@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KESTREL LAGOON — an open-world crime story</title>
+<link rel="stylesheet" href="./src/style.css">
+<script type="importmap">
+{ "imports": { "three": "./vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<canvas id="game-canvas" aria-label="Kestrel Lagoon: an open-world crime game in a sun-soaked lagoon city"></canvas>
+
+<!-- ===================== HUD ===================== -->
+<div id="hud" style="display:none">
+  <div id="damage-vignette"></div>
+  <div id="crosshair">+</div>
+
+  <!-- Mission card: top-left -->
+  <div id="mission-card" class="panel" style="display:none">
+    <div class="mc-top"><img id="mission-portrait" alt=""><div>
+      <div id="mission-title">CH1 — SHALLOW WATER</div>
+      <div id="mission-contact">Delia Marsh</div>
+    </div></div>
+    <div id="mission-stage">STAGE 1/3</div>
+    <div id="mission-next">NEXT: —</div>
+    <div id="mission-timer">⏱ 00:00</div>
+  </div>
+
+  <!-- Police response: left, under the mission card -->
+  <div id="police-panel" class="panel" style="display:none">
+    <div id="police-head" class="panel-head">KLPD RESPONSE</div>
+    <div id="police-list"></div>
+  </div>
+
+  <!-- Wanted / cash / clock: top-right -->
+  <div id="top-right">
+    <div id="wanted-stars">☆☆☆☆☆</div>
+    <div id="insight-badge" style="display:none">● IN SIGHT</div>
+    <div id="cash">$250</div>
+    <div id="clock">18:12 · DAY 1</div>
+    <div id="district">HARBOR WATCH</div>
+    <div id="rep-line"><div id="rep-bar-wrap"><div id="rep-bar"></div></div><span id="rep-title">DRIFTER</span> <span id="rep-num">REP 0</span></div>
+  </div>
+
+  <!-- Crew panel: right-middle -->
+  <div id="crew-panel" class="panel"></div>
+
+  <!-- Health / armour: bottom-left, above the minimap -->
+  <div id="vitals">
+    <div class="vital-row"><span class="vital-label">HP <b id="health-num">100</b></span><div class="bar-wrap"><div id="health-bar"></div></div></div>
+    <div class="vital-row"><span class="vital-label">ARMOUR</span><div class="bar-wrap"><div id="armour-bar"></div></div></div>
+  </div>
+
+  <!-- Minimap: bottom-left -->
+  <div id="minimap-wrap">
+    <canvas id="minimap" width="190" height="190"></canvas>
+    <div id="objective-dist" style="display:none">0m</div>
+  </div>
+
+  <!-- Dialogue: bottom-centre -->
+  <div id="dialogue-box" class="panel" style="display:none">
+    <img id="dialogue-portrait" alt="">
+    <div><div id="dialogue-speaker">—</div><div id="dialogue-text">—</div></div>
+  </div>
+
+  <!-- Radio + weapons + vehicle: bottom-right -->
+  <div id="bottom-right">
+    <div id="radio-widget" class="panel"><span id="radio-station">LAGOON 88.3</span><span id="radio-song">—</span></div>
+    <div id="weapon-slots"></div>
+    <div id="vehicle-panel" class="panel" style="display:none">
+      <div id="vehicle-name">—</div>
+      <div id="speed-row"><span id="speed-num">0</span><span class="speed-unit">km/h</span><span id="speed-gear">GEAR 1</span></div>
+      <div class="bar-wrap"><div id="vehicle-cond"></div></div>
+      <div id="vehicle-cond-num">100%</div>
+    </div>
+  </div>
+
+  <!-- Banner + toast: top-centre -->
+  <div id="banner" style="display:none"><div id="banner-title"></div><div id="banner-sub"></div></div>
+  <div id="toast" style="display:none"></div>
+</div>
+
+<!-- ===================== TITLE ===================== -->
+<div id="title-screen" class="screen">
+  <div class="title-bg"></div>
+  <div class="title-main">
+    <div class="title-left">
+      <div class="logo-kicker">AN OPEN-WORLD CRIME STORY</div>
+      <h1 class="logo">KESTREL<br>LAGOON</h1>
+      <p class="logline">Three years gone for a job that went sideways. Rook is back in Kestrel Lagoon — and the Dredgers own the water now.</p>
+      <div class="menu-buttons">
+        <button id="btn-continue" class="menu-btn primary">CONTINUE — NO SAVE YET</button>
+        <button id="btn-new" class="menu-btn">NEW GAME</button>
+        <button id="btn-controls" class="menu-btn">HOW TO PLAY / CONTROLS</button>
+        <button id="btn-settings" class="menu-btn">SETTINGS</button>
+        <button id="btn-stats" class="menu-btn">STATISTICS</button>
+      </div>
+      <div class="title-contacts"><div class="panel-head">CONTACTS WITH WORK</div><div id="title-contacts"></div></div>
+    </div>
+    <div class="title-right">
+      <div class="panel-head">YOUR CREW — LIVE CREW ORDERS</div>
+      <div id="title-crew"></div>
+      <div class="howto panel">
+        <div class="panel-head">HOW TO PLAY</div>
+        <ul>
+          <li><b>WASD</b> move / drive · <b>Mouse</b> aim · <b>Click</b> shoot</li>
+          <li><b>F</b> steal / exit car · <b>E</b> interact · <b>R</b> reload</li>
+          <li><b>M</b> map &amp; jobs · <b>Esc</b> pause · <b>1–5</b> weapons</li>
+          <li><b>C</b> crew order · <b>X</b> crew ability · <b>T</b> pick crew</li>
+          <li><b>Q</b> radio · <b>V</b> camera · <b>Shift</b> sprint · <b>Space</b> handbrake</li>
+        </ul>
+        <p>8 story jobs · 3 street races · 20 Gull Caches · 2 properties · taxi gigs · wanted 1–5★ · day/night cycle.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== PAUSE ===================== -->
+<div id="pause-screen" class="screen" style="display:none">
+  <div class="screen-card">
+    <h2>PAUSED</h2>
+    <div class="menu-buttons">
+      <button id="btn-resume" class="menu-btn primary">RESUME</button>
+      <button id="btn-save" class="menu-btn">SAVE GAME (SLOT 1)</button>
+      <button id="btn-pause-controls" class="menu-btn">CONTROLS</button>
+      <button id="btn-pause-settings" class="menu-btn">SETTINGS</button>
+      <button id="btn-pause-stats" class="menu-btn">STATISTICS</button>
+      <button id="btn-quit" class="menu-btn danger">QUIT TO TITLE</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== MAP ===================== -->
+<div id="map-screen" class="screen" style="display:none">
+  <div class="map-layout">
+    <div class="map-left">
+      <h2>KESTREL LAGOON — CITY MAP</h2>
+      <canvas id="map-canvas" width="640" height="480"></canvas>
+      <div class="legend panel">
+        <div class="panel-head">LEGEND</div>
+        <div class="legend-grid">
+          <span><i class="dot pink"></i>Story job</span><span><i class="dot gold"></i>GPS objective</span>
+          <span><i class="dot red"></i>Police / enemy</span><span><i class="dot green"></i>Crew / safehouse</span>
+          <span><i class="dot cyan"></i>Race / respray</span><span><i class="dot orange"></i>Gun shop</span>
+          <span><i class="dot purple"></i>Gull Cache</span><span><i class="dot white"></i>You</span>
+          <span><i class="dot yellow"></i>Property</span><span><i class="dot grey"></i>Road</span>
+          <span><i class="dot blue"></i>Water / marina</span><span><i class="dot dark"></i>Airstrip</span>
+        </div>
+      </div>
+    </div>
+    <div class="map-right">
+      <div class="panel-head">STORY JOBS</div>
+      <div id="map-job-list"></div>
+      <div class="panel-head">RACES · GIGS · PROPERTY</div>
+      <div id="map-races"></div>
+      <div class="panel-head">ROOK CALLOWAY</div>
+      <div id="map-stats" class="stat-grid"></div>
+      <button id="btn-map-close" class="menu-btn primary">CLOSE MAP (M)</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== CONTROLS ===================== -->
+<div id="controls-screen" class="screen" style="display:none">
+  <div class="screen-card wide">
+    <h2>CONTROLS</h2>
+    <div class="controls-grid">
+      <div><b>W A S D / Arrows</b><span>Move / drive</span></div>
+      <div><b>Mouse</b><span>Aim camera</span></div>
+      <div><b>Left click</b><span>Shoot / punch</span></div>
+      <div><b>F</b><span>Steal car / exit car</span></div>
+      <div><b>E</b><span>Interact (shop / job)</span></div>
+      <div><b>R</b><span>Reload</span></div>
+      <div><b>1 – 5</b><span>Weapon slots</span></div>
+      <div><b>M</b><span>Map, jobs, races</span></div>
+      <div><b>Esc</b><span>Pause</span></div>
+      <div><b>C</b><span>Crew order (FOLLOW/HOLD/ATTACK/DISTRACT)</span></div>
+      <div><b>X</b><span>Crew ability (getaway / blackout / mark)</span></div>
+      <div><b>T</b><span>Pick crew member</span></div>
+      <div><b>Q</b><span>Radio station</span></div>
+      <div><b>V</b><span>Camera distance</span></div>
+      <div><b>Shift</b><span>Sprint</span></div>
+      <div><b>Space</b><span>Handbrake</span></div>
+    </div>
+    <button class="menu-btn" data-back>BACK</button>
+  </div>
+</div>
+
+<!-- ===================== SETTINGS ===================== -->
+<div id="settings-screen" class="screen" style="display:none">
+  <div class="screen-card">
+    <h2>SETTINGS</h2>
+    <label>Volume <input id="setting-volume" type="range" min="0" max="100" value="70"></label>
+    <label>Mouse sensitivity <input id="setting-sensitivity" type="range" min="30" max="200" value="100"></label>
+    <label>Camera <select id="setting-camera"><option value="0">Close chase</option><option value="1">Far chase</option></select></label>
+    <label>Radio station <select id="setting-radio"></select></label>
+    <button class="menu-btn" data-back>BACK</button>
+  </div>
+</div>
+
+<!-- ===================== STATS ===================== -->
+<div id="stats-screen" class="screen" style="display:none">
+  <div class="screen-card wide">
+    <h2>STATISTICS — ROOK CALLOWAY</h2>
+    <div id="stats-body"></div>
+    <button class="menu-btn" data-back>BACK</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
