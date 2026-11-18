@@ -34,14 +34,18 @@ export function createPedestrians(scene, seed, colliders) {
   const rng = makeRng(seed + 7);
   const peds = [];
 
-  function spawnPed(x, z) {
+  // opts.fleeing: spawn already running (seconds); opts.fleeFrom: the
+  // point the ped runs away from — used by staged shots (a roadblock or
+  // a firefight) where there is no live gunfire to trigger the flee.
+  function spawnPed(x, z, opts = {}) {
     const mesh = buildPersonMesh(rng.pick(SHIRTS), rng.pick(SKINS), rng.range(0.92, 1.08));
     mesh.position.set(x, 0, z);
     scene.add(mesh);
     const ped = {
       mesh, x, z, heading: rng.range(0, Math.PI * 2),
       speed: rng.range(1.2, 2.2), walkPhase: rng.range(0, 6),
-      target: null, fleeing: 0, dead: false, pauseTimer: rng.range(0, 6),
+      target: null, fleeing: opts.fleeing || 0, fleeFrom: opts.fleeFrom || null,
+      dead: false, pauseTimer: rng.range(0, 6),
     };
     peds.push(ped);
     return ped;
@@ -65,9 +69,11 @@ export function createPedestrians(scene, seed, colliders) {
       let moving = true;
       if (p.fleeing > 0) {
         p.fleeing -= dt;
-        // Run away from the gunfire.
-        const away = Math.atan2(p.x - gunfireAt.x, p.z - gunfireAt.z);
-        p.heading = away;
+        // Run away from the gunfire — or from the staged threat point
+        // when there is no live gunfire (gunfireAt is null on a quiet
+        // street, so a bare read here would throw).
+        const from = gunfireAt || p.fleeFrom;
+        if (from) p.heading = Math.atan2(p.x - from.x, p.z - from.z);
         p.speed = 6.5;
       } else {
         p.speed = 1.6;

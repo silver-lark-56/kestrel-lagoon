@@ -63,11 +63,21 @@ export function createPolice(scene, colliders, audio) {
     const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.24, 0.4, 6),
       new THREE.MeshLambertMaterial({ color: 0xf2f2f2 }));
     stripe.position.y = 0.1;
+    // Rotor disc: a translucent blur disc so the spinning rotor reads at a
+    // distance, plus a tail rotor — the two shapes that say "helicopter".
+    const disc = new THREE.Mesh(new THREE.CircleGeometry(6.5, 24),
+      new THREE.MeshBasicMaterial({ color: 0xd8dee8, transparent: true, opacity: 0.18, side: THREE.DoubleSide, depthWrite: false }));
+    disc.rotation.x = -Math.PI / 2;
+    disc.position.y = 1.15;
+    const tailRotor = new THREE.Mesh(new THREE.CircleGeometry(0.9, 12),
+      new THREE.MeshBasicMaterial({ color: 0xd8dee8, transparent: true, opacity: 0.3, side: THREE.DoubleSide, depthWrite: false }));
+    tailRotor.rotation.y = Math.PI / 2;
+    tailRotor.position.set(0.35, 0.6, -7.3);
     const cone = new THREE.Mesh(new THREE.ConeGeometry(7, 42, 14, 1, true),
-      new THREE.MeshBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+      new THREE.MeshBasicMaterial({ color: 0xfff2b0, transparent: true, opacity: 0.28, side: THREE.DoubleSide, depthWrite: false }));
     cone.position.y = -21;
     cone.rotation.x = Math.PI;
-    g.add(body, cabin, rotor, tail, stripe, cone);
+    g.add(body, cabin, rotor, tail, stripe, cone, disc, tailRotor);
     g.userData = { rotor, cone };
     scene.add(g);
     heli = { group: g, angle: Math.random() * Math.PI * 2, spotlightOn: true };
@@ -77,16 +87,23 @@ export function createPolice(scene, colliders, audio) {
   // Staging: place a unit exactly on the nearest road to (x, z) — no random
   // offset, so a staged shot frames identically every run. Pre-placing the
   // full wanted target also stops the update loop spawning random units.
-  function placeUnitAt(x, z, px, pz) {
+  // opts.exact skips the road snap (for lane-exact roadblocks);
+  // opts.hold parks the unit as a roadblock that never moves;
+  // opts.angle rotates its heading off head-on;
+  // opts.state overrides the held unit's displayed state (a held RAMMING
+  // unit keeps its pose AND its label — a live ramming unit would drive
+  // into the player car before the capture frame).
+  function placeUnitAt(x, z, px, pz, opts = {}) {
     const callsign = POLICE_UNITS[unitCounter % POLICE_UNITS.length];
     unitCounter++;
     const model = modelById('interceptor');
     const mesh = buildCarMesh(model);
-    const rp = nearestRoadPoint(x, z);
+    const rp = opts.exact ? { x, z } : nearestRoadPoint(x, z);
+    const heading = Math.atan2(px - rp.x, pz - rp.z) + (opts.angle || 0);
     mesh.position.set(rp.x, 0, rp.z);
-    mesh.rotation.y = Math.atan2(px - rp.x, pz - rp.z);
+    mesh.rotation.y = heading;
     scene.add(mesh);
-    const unit = { mesh, callsign, x: rp.x, z: rp.z, heading: Math.atan2(px - rp.x, pz - rp.z), speed: 0, state: 'PURSUIT', mode: 'chase', blockTimer: 0 };
+    const unit = { mesh, callsign, x: rp.x, z: rp.z, heading, speed: 0, state: opts.state || (opts.hold ? 'ROADBLOCK' : 'PURSUIT'), mode: 'chase', blockTimer: 0, hold: !!opts.hold, holdState: opts.state || null };
     units.push(unit);
     return unit;
   }
@@ -160,6 +177,16 @@ export function createPolice(scene, colliders, audio) {
       let diff = wantAngle - u.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
+      if (u.hold) {
+        // Staged roadblock: holds its placed pose; still counts as seeing
+        // the player, and its light bar still flashes. A held unit with
+        // a staged state (RAMMING) keeps that label.
+        u.state = u.holdState || 'ROADBLOCK';
+        u.dist = dist;
+        const bar = u.mesh.userData.lightBar;
+        if (bar) bar.rotation.y = Math.floor(performance.now() / 120) % 2 === 0 ? 0 : Math.PI;
+        continue;
+      }
       // One unit in three sets a roadblock ahead of a fast player.
       if (S.wanted >= 2 && playerSpeed > 30 && (units.indexOf(u) % 3 === 2) && dist < 70 && dist > 25) {
         u.mode = 'block';
@@ -202,13 +229,16 @@ export function createPolice(scene, colliders, audio) {
       u.dist = dist;
     }
 
-    // Helicopter: orbit the player, spotlight tracking.
+    // Helicopter: orbit the player, spotlight tracking — unless pinned
+    // for a staged shot, in which case it holds its placed pose.
     if (heli) {
       heli.angle += dt * 0.35;
-      const hx = playerPos.x + Math.cos(heli.angle) * 26;
-      const hz = playerPos.z + Math.sin(heli.angle) * 26;
-      heli.group.position.set(hx, 42, hz);
-      heli.group.lookAt(playerPos.x, 0, playerPos.z);
+      if (!heli.pinned) {
+        const hx = playerPos.x + Math.cos(heli.angle) * 26;
+        const hz = playerPos.z + Math.sin(heli.angle) * 26;
+        heli.group.position.set(hx, 42, hz);
+        heli.group.lookAt(playerPos.x, 0, playerPos.z);
+      }
       heli.group.userData.rotor.rotation.y += dt * 22;
       heli.group.userData.cone.visible = heli.spotlightOn;
     }
@@ -240,5 +270,14 @@ export function createPolice(scene, colliders, audio) {
     // Staging helpers: place a unit / the heli exactly where a shot needs them.
     spawnUnitForShot(pos) { return spawnUnit(pos); },
     placeUnitAt,
-    spawnHeliForShot() { if (!heli) spawnHeli(); } };
+    spawnHeliForShot() { if (!heli) spawnHeli(); },
+    // Pin the heli at an exact spot, broadside to the chase camera, so the
+    // cover frame always shows it (yaw 0 = nose south, side to the camera).
+    placeHeliForShot(x, y, z, yaw) {
+      if (!heli) spawnHeli();
+      heli.pinned = true;
+      heli.group.position.set(x, y, z);
+      heli.group.rotation.set(0, yaw, 0);
+      return heli;
+    } };
 }

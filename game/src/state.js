@@ -1,7 +1,7 @@
 // KESTREL LAGOON — the single mutable game state: money, rep, wanted level,
 // mission progress, crew orders, radio, statistics and the three save slots.
 // Pure data and save/load; no rendering and no three.js in here.
-import { CREW, JOBS, RADIO, REP_TITLES, WEAPONS, repLevel } from './config.js';
+import { CACHES, CREW, JOBS, PROPERTIES, RACES, RADIO, REP_NEEDS, REP_TITLES, WEAPONS, repLevel } from './config.js';
 
 export const SAVE_PREFIX = 'kestrel-lagoon.save.';
 export const SETTINGS_KEY = 'kestrel-lagoon.settings';
@@ -100,6 +100,39 @@ export function addCash(n, why) {
 export function addMoney(n, why) { return addCash(n, why); }
 
 export function repTitle() { return REP_TITLES[repLevel(S.rep)]; }
+
+// Skills (1–5 pips each) derived from play statistics — shown on the map
+// screen so progression is visible at a glance. Every pip is earned by a
+// real stat, never staged directly.
+export function skillLevels() {
+  const st = S.stats;
+  const pips = (v) => Math.max(1, Math.min(5, v));
+  return [
+    { name: 'DRIVING', level: pips(1 + Math.floor(st.distanceDriven / 6000)) },
+    { name: 'SHOOTING', level: pips(1 + Math.floor(st.kills / 6)) },
+    { name: 'STAMINA', level: pips(1 + Math.floor(st.distanceWalked / 4000)) },
+    { name: 'STEALTH', level: pips(1 + Math.floor(S.cachesFound.length / 5)) },
+    { name: 'INFLUENCE', level: pips(1 + Math.floor(S.rep / 400)) },
+    { name: 'STREET SENSE', level: pips(1 + Math.floor(S.jobsDone.length / 2)) },
+  ];
+}
+
+// Overall completion: story jobs 50%, Gull Caches 20%, properties 15%,
+// street races 15%.
+export function completionPct() {
+  const jobs = (S.jobsDone.length / JOBS.length) * 50;
+  const caches = (S.cachesFound.length / CACHES.length) * 20;
+  const props = (S.propertiesOwned.length / PROPERTIES.length) * 15;
+  const races = (S.stats.racesWon / RACES.length) * 15;
+  return Math.round(jobs + caches + props + races);
+}
+
+// Next REP title and the REP it needs, or null at the top title.
+export function repNext() {
+  const lvl = repLevel(S.rep);
+  if (lvl >= REP_TITLES.length - 1) return null;
+  return { title: REP_TITLES[lvl + 1], need: REP_NEEDS[lvl + 1] };
+}
 
 export function hideDialogue() { S.dialogue = null; }
 

@@ -17,14 +17,52 @@ export function createCombat(scene, camera, audio, police, peds) {
   let gunfireAt = null;
   let gunfireTimer = 0;
 
-  // Muzzle flash: a small additive sprite at the barrel.
+  // Muzzle flash: a bright core + halo + an additive star-sprite at the
+  // barrel, so the gunshot reads at a glance. The glow is a 4-point star
+  // (long cardinal spikes, short diagonal spikes) over a hot core — it
+  // reads as a gunshot, not a flat disc. Kept modest so it never
+  // swallows the frame.
   {
     const g = new THREE.Group();
-    const core = new THREE.Mesh(new THREE.SphereGeometry(0.42, 6, 5),
-      new THREE.MeshBasicMaterial({ color: 0xffe9a8 }));
-    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.7, 6, 5),
-      new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: 0.55 }));
-    g.add(core, halo);
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.5, 6, 5),
+      new THREE.MeshBasicMaterial({ color: 0xfff6c0 }));
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.8, 6, 5),
+      // depthWrite off: the halo must not occlude the star sprite that
+      // sits at its centre, or the star vanishes and only a flat disc
+      // shows (v3 first try: the 1.0 m halo hid the 2.2 m star).
+      new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: 0.4, depthWrite: false }));
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = 128; glowCanvas.height = 128;
+    const gg = glowCanvas.getContext('2d');
+    gg.translate(64, 64);
+    // Hot core.
+    const grad = gg.createRadialGradient(0, 0, 2, 0, 0, 26);
+    grad.addColorStop(0, 'rgba(255,255,240,1)');
+    grad.addColorStop(0.5, 'rgba(255,220,120,0.9)');
+    grad.addColorStop(1, 'rgba(255,150,50,0)');
+    gg.fillStyle = grad;
+    gg.beginPath(); gg.arc(0, 0, 26, 0, Math.PI * 2); gg.fill();
+    // Spikes: a triangle from the centre to a sharp tip, rotated.
+    function spike(angle, len, wdt, color) {
+      gg.save();
+      gg.rotate(angle);
+      gg.fillStyle = color;
+      gg.beginPath();
+      gg.moveTo(0, -wdt);
+      gg.lineTo(len, 0);
+      gg.lineTo(0, wdt);
+      gg.closePath();
+      gg.fill();
+      gg.restore();
+    }
+    for (const a of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) spike(a, 62, 5, 'rgba(255,200,90,0.95)');
+    for (const a of [Math.PI / 4, 3 * Math.PI / 4, -Math.PI / 4, -3 * Math.PI / 4]) spike(a, 34, 4, 'rgba(255,160,60,0.85)');
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(glowCanvas), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    glow.scale.set(2.6, 2.6, 1);
+    g.add(core, halo, glow);
     g.visible = false;
     scene.add(g);
     muzzle = g;
@@ -55,12 +93,24 @@ export function createCombat(scene, camera, audio, police, peds) {
     const rng = makeRng(seed + count * 31);
     for (let i = 0; i < count; i++) {
       const ex = x + rng.range(-18, 18), ez = z + rng.range(-18, 18);
-      const mesh = buildPersonMesh(0x8a2f2f, rng.pick([0xc98d5f, 0xe8b98d, 0x8a5a3b]), 1.02);
+      const mesh = buildPersonMesh(0xb03a30, rng.pick([0xc98d5f, 0xe8b98d, 0x8a5a3b]), 1.02);
       mesh.position.set(ex, 0, ez);
+      // Red marker above every live enemy: at night a dark-red shirt on
+      // a dark street is nearly invisible, so the firefight reads as
+      // "Rook shooting at nothing" (v3 combat shot). The marker is a
+      // plain gameplay aid (GTA-style threat diamond), not staging.
+      const marker = new THREE.Group();
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.38, 0.8, 4),
+        new THREE.MeshBasicMaterial({ color: 0xff2a2a }));
+      spike.rotation.x = Math.PI; // point down at the enemy
+      marker.add(spike);
+      marker.position.set(0, 2.7, 0);
+      mesh.add(marker);
       scene.add(mesh);
       enemies.push({
         mesh, x: ex, z: ez, hp: 60, heading: 0, shootTimer: rng.range(0.5, 2),
         walkPhase: rng.range(0, 6), dead: false, speed: rng.range(2.4, 3.4),
+        marker,
       });
     }
   }
@@ -153,6 +203,7 @@ export function createCombat(scene, camera, audio, police, peds) {
         e.dead = true;
         e.mesh.rotation.x = -Math.PI / 2;
         e.mesh.position.y = 0.4;
+        if (e.marker) e.marker.visible = false; // dead enemies lose their marker
         S.stats.kills += 1;
         S.stageKills += 1;
         addRep(10);
@@ -225,6 +276,11 @@ export function createCombat(scene, camera, audio, police, peds) {
       u.legL.rotation.x = swing; u.legR.rotation.x = -swing;
       e.mesh.position.set(e.x, 0, e.z);
       e.mesh.rotation.y = e.heading;
+      // Marker spins and bobs so it catches the eye even at range.
+      if (e.marker) {
+        e.marker.rotation.y += dt * 2;
+        e.marker.position.y = 2.7 + Math.sin(now * 2.5 + e.walkPhase) * 0.12;
+      }
     }
   }
 

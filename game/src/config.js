@@ -9,10 +9,10 @@ export const WORLD = {
 export const DISTRICTS = [
   { id: 'causeway', name: 'PELICAN CAUSEWAY', x0: 300, z0: -90, x1: 460, z1: 90, heat: 2, blurb: 'The long bridge out to the flats.' },
   { id: 'stilt', name: 'STILT ROW', x0: -460, z0: -90, x1: -300, z1: 90, heat: 1, blurb: 'Houses on poles over the shallows.' },
-  { id: 'quay', name: 'NEON QUAY', x0: -150, z0: -360, x1: 150, z1: -190, heat: 3, blurb: 'Bars, clubs and bad decisions.' },
+  { id: 'quay', name: 'NEON QUAY', x0: -150, z0: -360, x1: 150, z1: -190, heat: 3, blurb: 'Bars, clubs and bad decisions.', labelDx: 45 },
   { id: 'cannery', name: 'OLD CANNERY', x0: -460, z0: -360, x1: -300, z1: -190, heat: 2, blurb: 'Rusted fish works, quiet streets.' },
-  { id: 'marina', name: 'GULL MARINA', x0: 150, z0: 190, x1: 460, z1: 360, heat: 1, blurb: 'Yachts, gulls and slow money.' },
-  { id: 'flats', name: 'HANGAR FLATS', x0: 300, z0: 190, x1: 460, z1: 360, heat: 0, blurb: 'Airstrip and empty hangars.' },
+  { id: 'marina', name: 'GULL MARINA', x0: 150, z0: 190, x1: 460, z1: 360, heat: 1, blurb: 'Yachts, gulls and slow money.', labelDx: -50, labelDz: -30 },
+  { id: 'flats', name: 'HANGAR FLATS', x0: 300, z0: 190, x1: 460, z1: 360, heat: 0, blurb: 'Airstrip and empty hangars.', labelDx: 25, labelDz: 35 },
   { id: 'gardens', name: 'CORAL GARDENS', x0: -150, z0: 190, x1: 150, z1: 360, heat: 1, blurb: 'Palm streets and pastel walls.' },
   { id: 'watch', name: 'HARBOR WATCH', x0: -150, z0: -90, x1: 150, z1: 190, heat: 2, blurb: 'Downtown towers over the water.' },
   { id: 'lantern', name: 'LANTERN DISTRICT', x0: 150, z0: -190, x1: 300, z1: 190, heat: 3, blurb: 'Night market, all night.' },
@@ -35,6 +35,7 @@ export const CREW = [
 
 export const CONTACTS = [
   { id: 'delia', name: 'Delia Marsh', role: 'Fixer · “The Heron”', color: '#b388ff', skin: '#e8b98d', hair: '#d8d8e0', hairStyle: 'bob' },
+  { id: 'nadia', name: 'Nadia Fenn', role: 'Market boss · Lantern District', color: '#ff8a5c', skin: '#8a5a3b', hair: '#1c1c22', hairStyle: 'braids' },
   { id: 'ans', name: 'Anselm Pryce', role: 'Harbor boss', color: '#7ddf8e', skin: '#c98d5f', hair: '#6b4a2b', hairStyle: 'flat' },
   { id: 'venn', name: 'Dario Venn', role: 'Boss of the Dredgers', color: '#ff6b4a', skin: '#e8b98d', hair: '#1c1c22', hairStyle: 'slick' },
   { id: 'okafor', name: 'Chief Okafor', role: 'Kestrel Lagoon PD', color: '#8fb7ff', skin: '#5a3a26', hair: '#111114', hairStyle: 'short' },
@@ -57,11 +58,11 @@ export const JOBS = [
       { type: 'drive', label: 'Haul the van to Old Cannery', x: -380, z: -280, line: 'KLPD runs the causeway tonight. Take the back streets.', speaker: 'ans' },
       { type: 'escape', label: 'Lose the heat, then park in the yard', x: -380, z: -280, line: 'Clean run. The lagoon pays its drivers, Rook.', speaker: 'ans' },
     ] },
-  { id: 'j3', no: 3, title: 'NIGHT MARKET', contact: 'delia', payout: 4200, blurb: 'The Dredgers collect protection in the Lantern District. End it.',
+  { id: 'j3', no: 3, title: 'NIGHT MARKET', contact: 'nadia', payout: 4200, blurb: 'The Dredgers collect protection in the Lantern District. End it.',
     stages: [
-      { type: 'goto', label: 'Reach the Lantern District market', x: 220, z: 0, line: 'They shake down my vendors every Friday. Not this Friday.', speaker: 'delia' },
-      { type: 'kill', label: 'Take out the Dredger crew', count: 6, x: 220, z: 0, line: 'Venn sends boys to do a boss’s job. Send them home.', speaker: 'delia' },
-      { type: 'escape', label: 'Lose any heat', x: 220, z: 0, line: 'The market breathes again. That is worth more than cash.', speaker: 'delia' },
+      { type: 'goto', label: 'Reach the Lantern District market', x: 220, z: 0, line: 'They shake down my vendors every Friday. Not this Friday.', speaker: 'nadia' },
+      { type: 'kill', label: 'Take out the Dredger crew', count: 6, x: 220, z: 0, line: 'Venn sends boys to do a boss’s job. Send them home.', speaker: 'nadia' },
+      { type: 'escape', label: 'Lose any heat', x: 220, z: 0, line: 'The market breathes again. That is worth more than cash.', speaker: 'nadia' },
     ] },
   { id: 'j4', no: 4, title: 'SIREN SONG', contact: 'okafor', payout: 5000, blurb: 'The chief wants a rat inside the Dredgers — and a favor first.',
     stages: [
@@ -83,10 +84,10 @@ export const JOBS = [
       { type: 'escape', label: 'Lose the cops before the scanner closes', x: 420, z: 0, line: 'Scanner window closing — break line of sight, now!', speaker: 'ivo' },
       { type: 'deliver', label: 'Bring the package home', x: -210, z: 150, line: 'Nine minutes, whole city, zero cameras. Beautiful.', speaker: 'ivo' },
     ] },
-  { id: 'j7', no: 7, title: 'HARBOR FIRE', contact: 'sana', payout: 9000, blurb: 'The Dredgers torch Delia’s warehouse. Sana spots the arson crew from the roofs.',
+  { id: 'j7', no: 7, title: 'HARBOR FIRE', contact: 'sana', payout: 9000, blurb: 'The Dredgers torch a Neon Quay club. Sana spots the arson crew from the roofs.',
     stages: [
-      { type: 'goto', label: 'Reach the burning warehouse', x: -380, z: 150, line: 'Four of them, rooftops north side. I have them marked.', speaker: 'sana' },
-      { type: 'kill', label: 'Stop the arson crew', count: 5, x: -380, z: 150, line: 'Venn is done hiding. Good. So are we.', speaker: 'sana' },
+      { type: 'goto', label: 'Reach the burning club', x: -68, z: -262, line: 'Four of them, rooftops north side. I have them marked.', speaker: 'sana' },
+      { type: 'kill', label: 'Stop the arson crew', count: 5, x: -68, z: -262, line: 'Venn is done hiding. Good. So are we.', speaker: 'sana' },
       { type: 'drive', label: 'Chase Venn’s boat car to Gull Point', x: -230, z: 150, line: 'He runs for the point. Cut him off at the bridge!', speaker: 'sana' },
     ] },
   { id: 'j8', no: 8, title: 'HIGH WATER MARK', contact: 'delia', payout: 12000, blurb: 'One last job: Venn’s money, Venn’s crew, Venn himself — at the marina.',

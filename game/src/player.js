@@ -71,7 +71,12 @@ export function createPlayer(scene) {
       target.set(carPos.x, 1.5, carPos.z);
     } else {
       target.set(p.x, 1.6, p.z);
-      dist = p.aiming ? 6.5 : 9;
+      // On foot the follow distance is p.camDist (default 9): staged
+      // shots override it (the combat shot pulls in to 6 m so Rook
+      // reads ~200 px, R1/R3-sized, instead of ~120 px). Aiming keeps
+      // its own tighter 6.5 m. Normal play never touches camDist, so
+      // gameplay is unchanged.
+      dist = p.aiming ? 6.5 : p.camDist;
       height = 2.6 + p.camPitch * 3;
     }
     const cx = target.x - Math.sin(yaw) * Math.cos(p.camPitch) * dist;
@@ -84,7 +89,14 @@ export function createPlayer(scene) {
 
   function teleport(x, z, heading) {
     p.x = x; p.z = z;
-    if (heading !== undefined) { p.heading = heading; p.camYaw = heading; }
+    if (heading !== undefined) {
+      p.heading = heading; p.camYaw = heading;
+      // Orient the mesh too: on the title screen update() never runs,
+      // so a teleported Rook kept his spawn rotation (back to camera).
+      // In normal play update() overwrites this every frame, so no
+      // gameplay change.
+      mesh.rotation.y = heading;
+    }
     mesh.position.set(x, 0, z);
   }
 

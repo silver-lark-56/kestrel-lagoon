@@ -38,6 +38,33 @@ export function createRender(canvas) {
     new THREE.MeshBasicMaterial({ fog: false, side: THREE.BackSide, map: SKIES.day }));
   scene.add(skyDome);
 
+  // Sun disc + halo: a bright sun in the sky, so sunset shots (title,
+  // combat) show the sun itself, not just a gradient. Built as billboarded
+  // circle MESHES, not Sprites: Sprite objects never drew in this
+  // headless SwiftShader build (two probe runs: visible, in-frame, zero
+  // bright pixels), while the muzzle flash's mesh spheres render fine.
+  function glowTexture(stops) {
+    const c = document.createElement('canvas'); c.width = 128; c.height = 128;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(64, 64, 2, 64, 64, 64);
+    for (const [o, col] of stops) grad.addColorStop(o, col);
+    g.fillStyle = grad; g.fillRect(0, 0, 128, 128);
+    const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  }
+  // Solid bright core (no texture): the radial-gradient texture rendered
+  // dim through the title veil, while a flat near-white disc reads as a
+  // sun at a glance. The halo keeps its soft gradient.
+  const sunCore = new THREE.Mesh(new THREE.CircleGeometry(55, 24),
+    new THREE.MeshBasicMaterial({ color: 0xfff8d0, fog: false }));
+  const sunHalo = new THREE.Mesh(new THREE.CircleGeometry(175, 24),
+    new THREE.MeshBasicMaterial({
+      map: glowTexture([[0, 'rgba(255,180,90,0.55)'], [0.5, 'rgba(255,140,70,0.28)'], [1, 'rgba(255,120,60,0)']]),
+      transparent: true, fog: false, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.8,
+    }));
+  scene.add(sunCore, sunHalo);
+  const sunDir = new THREE.Vector3();
+
   const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
   camera.position.set(-200, 8, 160);
 
@@ -51,16 +78,18 @@ export function createRender(canvas) {
 
   let lampMat = null;
   function bindLamps(mat) { lampMat = mat; }
+  let facadeMats = [];
+  function bindFacades(mats) { facadeMats = mats; }
 
   // Blend the sky, fog and light for a time of day. t is hours 0..24.
   function applyTimeOfDay(sunPos, isNight, isSunset) {
     const sky = new THREE.Color();
     if (isNight) {
       sky.copy(SKY_NIGHT);
-      hemi.intensity = 0.35;
-      sun.intensity = 0.25;
+      hemi.intensity = 0.55;
+      sun.intensity = 0.4;
       sun.color.set(0x8fa8ff);
-      nightAmbient.intensity = 0.5;
+      nightAmbient.intensity = 0.65;
       if (lampMat) lampMat.color.set(0xffe9a8);
     } else if (isSunset) {
       sky.copy(SKY_SUNSET).lerp(SKY_DUSK, 0.35);
@@ -83,7 +112,21 @@ export function createRender(canvas) {
     if (skyDome.material.map !== dome) { skyDome.material.map = dome; skyDome.material.needsUpdate = true; }
     scene.fog.near = isNight ? 60 : 140;
     scene.fog.far = isNight ? 500 : 950;
+    // Facade glow: windows + shopfronts light up after dark (full at
+    // night, a warm hint at sunset, off by day).
+    const glow = isNight ? 1 : isSunset ? 0.35 : 0;
+    for (const m of facadeMats) m.emissiveIntensity = glow;
     sun.position.set(sunPos.x, Math.max(12, sunPos.y), sunPos.z);
+    // Sun disc follows the sun; hidden at night. Placed at 600, not at the
+    // dome (1500): SwiftShader never drew the sprites at 1250 despite the
+    // projection landing in-frame (probe: visible, screen (486,309)) — the
+    // muzzle glow sprite at 11 m renders fine, so the distance is the
+    // suspect. Scales keep the apparent size (~9 deg core, ~32 deg halo).
+    sunDir.set(sunPos.x, sunPos.y, sunPos.z).normalize();
+    sunCore.position.copy(sunDir).multiplyScalar(600);
+    sunHalo.position.copy(sunCore.position);
+    sunCore.visible = !isNight;
+    sunHalo.visible = !isNight;
   }
 
   function resize() {
@@ -92,7 +135,12 @@ export function createRender(canvas) {
     camera.updateProjectionMatrix();
   }
 
-  function render() { renderer.render(scene, camera); }
+  function render() {
+    // Billboard the sun meshes at the final camera before drawing.
+    sunCore.lookAt(camera.position);
+    sunHalo.lookAt(camera.position);
+    renderer.render(scene, camera);
+  }
 
-  return { renderer, scene, camera, applyTimeOfDay, resize, render, bindLamps, sun, hemi };
+  return { renderer, scene, camera, applyTimeOfDay, resize, render, bindLamps, bindFacades, sun, hemi };
 }

@@ -94,8 +94,13 @@ export function buildCity(scene, seed) {
   boxGeo.translate(0, 0.5, 0);
   const palettes = [];
   for (let p = 0; p < 6; p++) {
-    palettes.push({ mat: new THREE.MeshLambertMaterial({ map: facadeTexture(seed * 7 + p * 13, 5) }), list: [] });
+    const tex = facadeTexture(seed * 7 + p * 13, 5);
+    // Emissive map: the same lit windows + shopfront, glowing after dark.
+    // Intensity is driven by render.applyTimeOfDay (0 by day, so the day
+    // look is byte-identical to before).
+    palettes.push({ mat: new THREE.MeshLambertMaterial({ map: tex.map, emissiveMap: tex.emissive, emissive: 0xffffff, emissiveIntensity: 0 }), list: [] });
   }
+  dynamic.facadeMats = palettes.map((p) => p.mat);
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x4a4f58 });
   const dummy = new THREE.Object3D();
   const blocks = [];
@@ -120,8 +125,17 @@ export function buildCity(scene, seed) {
       const h = downtown ? rng.range(22, 58) : rng.range(8, 26);
       const x = b.cx + rng.range(-b.bw / 2 + w / 2, b.bw / 2 - w / 2);
       const z = b.cz + rng.range(-b.bd / 2 + d / 2, b.bd / 2 - d / 2);
+      // View-corridor clamp, tiered: the inner band (|z| < 18) stays low
+      // (14 m) so the city-name gantry and the police heli are never
+      // hidden behind a tower; the outer band (18–45 m) may rise to
+      // 26 m, giving the cover frame real urban enclosure — buildings
+      // that flank the gantry instead of a flat 14 m skyline. The gantry
+      // (bottom edge 15 m) still reads: outer-band towers stand beside
+      // it, not in front of it.
+      const inCorridor = Math.abs(z) < 45 && x > -140 && x < 160;
+      const hh = !inCorridor ? h : Math.abs(z) < 18 ? Math.min(h, 14) : Math.min(h, 26);
       const pal = downtown ? rng.int(0, 5) : rng.int(0, 5);
-      palettes[pal].list.push({ x, z, w, h, d });
+      palettes[pal].list.push({ x, z, w, h: hh, d });
       colliders.push({ x0: x - w / 2, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 });
     }
   }
@@ -164,7 +178,13 @@ export function buildCity(scene, seed) {
   // chase road z=0 and the warehouse road z=152), so the camera always has
   // palms in frame — the lagoon's postcard look. Road half-width is 7.
   for (let x = -380; x <= 380; x += 38) {
-    for (const zs of [-9, 9]) palmSpots.push({ x: x + 4, z: zs, s: 1.15, lean: 0 });
+    for (const zs of [-9, 9]) {
+      // The palm at (4, 9) stands between the cover camera and the GULL
+      // TACOS billboard (27, 14): its crown clips the sign's top edge.
+      // Skip it so the sign reads clean.
+      if (x === 0 && zs === 9) continue;
+      palmSpots.push({ x: x + 4, z: zs, s: 1.15, lean: 0 });
+    }
     for (const zs of [143, 161]) palmSpots.push({ x: x + 20, z: zs, s: 1.05, lean: 0 });
   }
   const trunkGeo = new THREE.CylinderGeometry(0.35, 0.5, 7, 5);
@@ -210,18 +230,86 @@ export function buildCity(scene, seed) {
   const SIGNS = [
     // Faces west, 100 m ahead of the sunset chase at capture time: the
     // city-name gantry over the road, dead centre of the cover frame.
-    // 30 m wide so it fits the gap between the flanking buildings.
-    { text: 'KESTREL LAGOON', fg: '#ff5d8f', bg: '#14181f', x: 76, z: -8, y: 26, w: 30, h: 8, ry: -Math.PI / 2 },
+    // 24 m wide on two posts, bottom edge at 15 m — above the 14 m
+    // view-corridor clamp, so no building can ever cover it.
+    { text: 'KESTREL LAGOON', fg: '#ff5d8f', bg: '#14181f', x: 45, z: 0, y: 18, w: 24, h: 6, ry: -Math.PI / 2 },
     { text: 'NEON QUAY', fg: '#4de3ff', bg: '#14181f', x: -76, z: -300, y: 18, w: 30, h: 8, ry: 0 },
     { text: 'CLUB VOLTAGE', fg: '#ffd166', bg: '#2a1040', x: 76, z: -228, y: 14, w: 30, h: 8, ry: 0 },
+    // The burning club of CH7 (HARBOR FIRE): a neon club sign on the
+    // Quay road's east verge at the job objective, with fire at its
+    // feet — the combat shot's landmark. Low (y=5.2, spans 2.2–8.2 m)
+    // so it stacks UNDER the NEON QUAY sign in the combat frame instead
+    // of covering it: a first try at y=10 sat at the same screen height
+    // as NEON QUAY and hid its right half. x=-66 sits in the
+    // building-free verge strip (road centre -76, blocks start at -65).
+    { text: 'CLUB EMBER', fg: '#ff8a5c', bg: '#2a1040', x: -66, z: -264, y: 5.2, w: 14, h: 6, ry: 0, posts: true },
     { text: 'GULL MARINA', fg: '#7ddf8e', bg: '#10202a', x: 300, z: 228, y: 16, w: 30, h: 8, ry: Math.PI / 2 },
     { text: 'PIER 9', fg: '#ff8a5c', bg: '#14181f', x: 228, z: 304, y: 12, w: 18, h: 6, ry: 0 },
+    // Roadside neon billboards along the chase road, low (y=10) so they
+    // never cover the gantry sign or the heli. They face west, toward the
+    // oncoming chase, so their text reads from the cover camera.
+    { text: 'LAGOON 88.3', fg: '#4de3ff', bg: '#14181f', x: 15, z: -14, y: 10, w: 12, h: 5, ry: -Math.PI / 2, posts: true },
+    { text: 'GULL TACOS', fg: '#ffd166', bg: '#14181f', x: 27, z: 14, y: 10, w: 12, h: 5, ry: -Math.PI / 2, posts: true },
   ];
+  const postMat = new THREE.MeshLambertMaterial({ color: 0x2b2f3a });
   for (const s of SIGNS) {
     const m = new THREE.Mesh(new THREE.PlaneGeometry(s.w, s.h),
       new THREE.MeshBasicMaterial({ map: signTexture(s.text, s.fg, s.bg) }));
     m.position.set(s.x, s.y, s.z); m.rotation.y = s.ry;
     group.add(m);
+    if (s.posts) {
+      // Two posts under a roadside billboard. Its width runs along z
+      // when it faces east/west (ry ±90°), along x when it faces
+      // north/south (ry 0/180°) — CLUB EMBER faces south.
+      const alongX = Math.abs(Math.sin(s.ry)) < 0.5;
+      for (const off of [-s.w * 0.35, s.w * 0.35]) {
+        const post = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, s.y - s.h / 2, 5), postMat);
+        if (alongX) post.position.set(s.x + off, (s.y - s.h / 2) / 2, s.z);
+        else post.position.set(s.x, (s.y - s.h / 2) / 2, s.z + off);
+        group.add(post);
+      }
+    }
+  }
+
+  // Gantry posts: the city-name sign spans the chase road on two posts
+  // at the kerbs, so it reads as a highway gantry, not a floating board.
+  for (const pz of [-11.5, 11.5]) {
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 15, 6), postMat);
+    post.position.set(45, 7.5, pz);
+    group.add(post);
+  }
+
+  // --- The burning club (CH7) --------------------------------------------------
+  // Flame cones + a warm glow sprite at the foot of the CLUB EMBER sign:
+  // the Dredgers' arson, visible from the combat camera as firelight on
+  // the street. Static set dressing; MeshBasicMaterial so it glows at night.
+  {
+    const flameOuter = new THREE.MeshBasicMaterial({ color: 0xff7a1a });
+    const flameInner = new THREE.MeshBasicMaterial({ color: 0xffd166 });
+    const outerGeo = new THREE.ConeGeometry(1.1, 2.8, 6);
+    const innerGeo = new THREE.ConeGeometry(0.6, 1.8, 6);
+    for (const [fx, fz] of [[-68, -264], [-67, -262], [-66, -265]]) {
+      const outer = new THREE.Mesh(outerGeo, flameOuter);
+      outer.position.set(fx, 1.4, fz);
+      const inner = new THREE.Mesh(innerGeo, flameInner);
+      inner.position.set(fx, 0.9, fz);
+      group.add(outer, inner);
+    }
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = 128; glowCanvas.height = 128;
+    const gg = glowCanvas.getContext('2d');
+    const grad = gg.createRadialGradient(64, 64, 4, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255,180,80,0.85)');
+    grad.addColorStop(0.5, 'rgba(255,120,30,0.35)');
+    grad.addColorStop(1, 'rgba(255,100,20,0)');
+    gg.fillStyle = grad; gg.fillRect(0, 0, 128, 128);
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: new THREE.CanvasTexture(glowCanvas), transparent: true,
+      blending: THREE.AdditiveBlending, depthWrite: false,
+    }));
+    glow.position.set(-67, 2.5, -264);
+    glow.scale.set(11, 7, 1);
+    group.add(glow);
   }
 
   // --- Marina: docks + boats ---------------------------------------------------

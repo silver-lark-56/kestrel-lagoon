@@ -2,7 +2,7 @@
 // the full city map (jobs, payouts, districts, legend, stats, GPS route),
 // controls, settings and statistics. The map screen is also the hub for
 // starting jobs, races, gigs and property deals.
-import { S, saveToSlot, loadFromSlot, slotSummary, repTitle } from './state.js';
+import { S, saveToSlot, loadFromSlot, slotSummary, repTitle, skillLevels, completionPct, repNext } from './state.js';
 import { JOBS, DISTRICTS, WORLD, CREW, RACES, PROPERTIES, CACHES, RADIO, SHOPS, districtAt, personById } from './config.js';
 import { portraitURL } from './textures.js';
 
@@ -39,7 +39,7 @@ export function createScreens(ctx) {
     }
     const crewRow = $('title-crew');
     if (crewRow) {
-      crewRow.innerHTML = CREW.map((c) => `<div class="title-crew-card"><img src="${portraitURL(c)}" alt="${c.name}"><div class="tc-name">${c.name}</div><div class="tc-role">${c.callsign} · ${c.role}</div><div class="tc-ability">${c.ability} — ${c.abilityDesc}</div></div>`).join('');
+      crewRow.innerHTML = CREW.map((c) => `<div class="title-crew-card"><img src="${portraitURL(c)}" alt="${c.name}"><div class="tc-text"><div class="tc-name">${c.name}</div><div class="tc-role">${c.callsign} · ${c.role}</div><div class="tc-ability">${c.ability} — ${c.abilityDesc}</div></div></div>`).join('');
     }
     const contacts = $('title-contacts');
     if (contacts) {
@@ -66,32 +66,15 @@ export function createScreens(ctx) {
     // Sand ring.
     c.strokeStyle = '#e8d8a8'; c.lineWidth = 6;
     c.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
-    // District fills + labels + heat.
+    // District fills only — labels are drawn LAST (end of this function),
+    // so the airstrip / marina rects and the GPS route can never paint
+    // over them.
     for (const d of DISTRICTS) {
       const a = toMap(d.x0, d.z0), b = toMap(d.x1, d.z1);
       c.fillStyle = `rgba(255,80,60,${0.06 * d.heat})`;
       c.fillRect(a.x, a.y, b.x - a.x, b.y - a.y);
       c.strokeStyle = 'rgba(255,255,255,0.25)'; c.lineWidth = 1;
       c.strokeRect(a.x, a.y, b.x - a.x, b.y - a.y);
-      // District label with a dark outline so it stays legible over blips.
-      // Two lines keep narrow districts from colliding with their neighbours.
-      const lx = (a.x + b.x) / 2, ly = (a.y + b.y) / 2;
-      const words = d.name.split(' ');
-      const line1 = words.slice(0, Math.ceil(words.length / 2)).join(' ');
-      const line2 = words.slice(Math.ceil(words.length / 2)).join(' ');
-      c.font = 'bold 10px sans-serif'; c.textAlign = 'center';
-      c.lineWidth = 3; c.strokeStyle = 'rgba(0,0,0,0.65)';
-      c.strokeText(line1, lx, ly - 5);
-      c.fillStyle = 'rgba(255,255,255,0.92)';
-      c.fillText(line1, lx, ly - 5);
-      if (line2) {
-        c.strokeText(line2, lx, ly + 6);
-        c.fillText(line2, lx, ly + 6);
-      }
-      c.font = '9px sans-serif';
-      c.strokeText(`HEAT ${'★'.repeat(d.heat)}${'☆'.repeat(5 - d.heat)}`, lx, ly + 18);
-      c.fillStyle = 'rgba(255,255,255,0.7)';
-      c.fillText(`HEAT ${'★'.repeat(d.heat)}${'☆'.repeat(5 - d.heat)}`, lx, ly + 18);
     }
     // Roads.
     const ROAD_XS = [-380, -304, -228, -152, -76, 0, 76, 152, 228, 304, 380];
@@ -106,6 +89,26 @@ export function createScreens(ctx) {
     { const a = toMap(388, 195), b = toMap(412, 345); c.fillRect(a.x, a.y, b.x - a.x, b.y - a.y); }
     c.fillStyle = '#1b6f8e';
     { const a = toMap(150, 210), b = toMap(330, 350); c.fillRect(a.x, a.y, b.x - a.x, b.y - a.y); }
+    // Street names along the roads, so the map reads as a named city.
+    // Vertical names are rotated to run along their road.
+    const STREETS = [
+      { name: 'PALOMA BOULEVARD', x: -200, z: 0, rot: 0 },
+      { name: 'HARBOR WAY', x: 0, z: -120, rot: Math.PI / 2 },
+      { name: 'NEON ROW', x: -150, z: -228, rot: 0 },
+      { name: 'CORAL WAY', x: -100, z: 228, rot: 0 },
+      { name: 'STILT LANE', x: -304, z: 120, rot: Math.PI / 2 },
+      { name: 'LANTERN WALK', x: 228, z: 120, rot: Math.PI / 2 },
+    ];
+    c.font = '9px sans-serif'; c.textAlign = 'center';
+    c.fillStyle = 'rgba(255,255,255,0.6)';
+    for (const s of STREETS) {
+      const p = toMap(s.x, s.z);
+      c.save();
+      c.translate(p.x, p.y);
+      c.rotate(s.rot);
+      c.fillText(s.name, 0, 0);
+      c.restore();
+    }
     const blip = (wx, wz, color, r = 6, label) => {
       const p = toMap(wx, wz);
       c.fillStyle = color;
@@ -141,6 +144,50 @@ export function createScreens(ctx) {
     c.strokeStyle = '#000'; c.lineWidth = 2; c.stroke();
     c.fillStyle = '#000'; c.font = 'bold 9px sans-serif'; c.textAlign = 'center';
     c.fillText('YOU', pp.x, pp.y + 3);
+
+    // District labels LAST, on dark pills: nothing (airstrip, marina, GPS
+    // route) may paint over them, and the pill keeps them legible over
+    // blips. Per-district offsets separate GULL MARINA / HANGAR FLATS,
+    // whose districts share one rect; labels are clamped to the canvas.
+    const pill = (cx, cy, w, h) => {
+      const r = 5, x0 = cx - w / 2, y0 = cy - h / 2;
+      c.beginPath();
+      c.moveTo(x0 + r, y0);
+      c.lineTo(x0 + w - r, y0); c.arcTo(x0 + w, y0, x0 + w, y0 + r, r);
+      c.lineTo(x0 + w, y0 + h - r); c.arcTo(x0 + w, y0 + h, x0 + w - r, y0 + h, r);
+      c.lineTo(x0 + r, y0 + h); c.arcTo(x0, y0 + h, x0, y0 + h - r, r);
+      c.lineTo(x0, y0 + r); c.arcTo(x0, y0, x0 + r, y0, r);
+      c.closePath();
+      c.fillStyle = 'rgba(8,12,20,0.68)';
+      c.fill();
+    };
+    for (const d of DISTRICTS) {
+      const a = toMap(d.x0, d.z0), b = toMap(d.x1, d.z1);
+      // Two lines keep narrow districts from colliding with neighbours.
+      const words = d.name.split(' ');
+      const line1 = words.slice(0, Math.ceil(words.length / 2)).join(' ');
+      const line2 = words.slice(Math.ceil(words.length / 2)).join(' ');
+      const heat = `HEAT ${'★'.repeat(d.heat)}${'☆'.repeat(5 - d.heat)}`;
+      const lines = line2 ? [line1, line2, heat] : [line1, heat];
+      c.font = 'bold 10px sans-serif';
+      const tw = Math.max(...lines.map((t) => c.measureText(t).width));
+      const pw = tw + 16, ph = lines.length * 11 + 10;
+      let lx = (a.x + b.x) / 2 + (d.labelDx || 0) * sx;
+      let ly = (a.y + b.y) / 2 + (d.labelDz || 0) * sz;
+      lx = Math.max(pw / 2 + 4, Math.min(W - pw / 2 - 4, lx));
+      ly = Math.max(ph / 2 + 4, Math.min(H - ph / 2 - 4, ly));
+      pill(lx, ly, pw, ph);
+      const top = ly - ph / 2 + 14;
+      c.textAlign = 'center';
+      c.font = 'bold 10px sans-serif';
+      c.fillStyle = 'rgba(255,255,255,0.95)';
+      c.fillText(line1, lx, top);
+      let y = top + 11;
+      if (line2) { c.fillText(line2, lx, y); y += 11; }
+      c.font = '9px sans-serif';
+      c.fillStyle = 'rgba(255,255,255,0.75)';
+      c.fillText(heat, lx, y);
+    }
   }
 
   function renderMapPanel() {
@@ -169,6 +216,17 @@ export function createScreens(ctx) {
     const stats = $('map-stats');
     if (stats) {
       stats.innerHTML = `<div>Cash <b>$${S.cash.toLocaleString()}</b></div><div>REP <b>${S.rep} · ${repTitle()}</b></div><div>Jobs <b>${S.jobsDone.length}/8</b></div><div>Gull Caches <b>${S.cachesFound.length}/20</b></div><div>Properties <b>${S.propertiesOwned.length}/2</b></div><div>Wanted <b>${'★'.repeat(S.wanted)}${'☆'.repeat(5 - S.wanted)}</b></div><div>District <b>${districtAt(S.playerX, S.playerZ).name}</b></div><div>Day <b>${S.day}</b></div>`;
+    }
+    // Skills strip (left column, under the legend — the right column is
+    // already full): 6 derived skills with pips, overall completion %,
+    // and the REP progression to the next title.
+    const skills = $('map-skills');
+    if (skills) {
+      const next = repNext();
+      const repLine = next ? `REP ${S.rep} · ${repTitle()} → ${next.title} ${next.need}` : `REP ${S.rep} · ${repTitle()} — MAX`;
+      const pips = (n) => '<span class="pip filled">●</span>'.repeat(n) + '<span class="pip">●</span>'.repeat(5 - n);
+      skills.innerHTML = `<div class="skills-head"><div class="panel-head">SKILLS</div><div class="skills-complete">${completionPct()}% COMPLETE · ${repLine}</div></div>` +
+        `<div class="skills-grid">${skillLevels().map((s) => `<div class="skill-cell"><div class="skill-name">${s.name}</div><div class="skill-pips">${pips(s.level)}</div></div>`).join('')}</div>`;
     }
     const races = $('map-races');
     if (races) {

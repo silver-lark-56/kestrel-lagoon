@@ -1,6 +1,7 @@
 // KESTREL LAGOON — main: boots every system in dependency order, runs the
 // frame loop, routes input actions, expires timed UI, handles death and
 // respawn, and drives the ?shot= staging and the ?selftest= scripted check.
+import * as THREE from 'three';
 import { S, freshState, resetState, loadFromSlot, saveToSlot, loadSettings, saveSettings } from './state.js';
 import { createInput, weaponSlotOf, ACT_ENTER, ACT_RELOAD, ACT_MAP, ACT_PAUSE, ACT_INTERACT, ACT_RADIO_PREV, ACT_CAMERA, ACT_CREW_CYCLE, ACT_CREW_ABILITY, ACT_CREW_SELECT } from './input.js';
 import { createAudio } from './audio.js';
@@ -26,12 +27,24 @@ window.addEventListener('unhandledrejection', (e) => window.__errors.push('rejec
 const canvas = document.getElementById('game-canvas');
 const render = createRender(canvas);
 const { scene, camera } = render;
+
+// Warm stage light for the title shot only: at sunset the sun sits WSW
+// behind the title camera, so Rook's camera-facing side is lit only by
+// the hemisphere light and he renders as a dark silhouette (v4) — while
+// R1/R3's protagonists are bright and detailed. A point light between
+// the camera and Rook lifts his front without touching the rest of the
+// scene (30 m cutoff; the ferris wheel is ~50 m out, the sky untouched).
+const titleLight = new THREE.PointLight(0xffd9a0, 60, 30, 2);
+titleLight.position.set(228, 4.5, 282);
+titleLight.visible = false;
+scene.add(titleLight);
 const audio = createAudio();
 const input = createInput(canvas);
 loadSettings();
 
 const city = buildCity(scene, 1);
 render.bindLamps(city.dynamic.bulbMat);
+render.bindFacades(city.dynamic.facadeMats);
 const traffic = createTraffic(scene, 1, city.colliders);
 const peds = createPedestrians(scene, 1, city.colliders);
 const playerObj = createPlayer(scene);
@@ -154,6 +167,10 @@ function frame() {
   const inGame = S.screen === 'game';
   const frozen = !inGame && S.screen !== 'title';
 
+  // The title stage light is on only for the staged title shot — never
+  // in normal play (orbit title) or in game.
+  titleLight.visible = S.screen === 'title' && shotName === 'title';
+
   // Timed UI expiry runs everywhere.
   expireTimedUI(now);
 
@@ -172,10 +189,15 @@ function frame() {
     if (shotFrames >= needFrames) {
       if (shotName === 'combat') {
         // Fire, then hold the muzzle flash lit so it is in the captured frame.
+        // Offset to the shooter's right-hand side: a flash dead ahead sits
+        // behind the player's head from the chase camera (probe: it projected
+        // to screen (640,306), inside the head silhouette). 1.0 m to the
+        // right puts the flash clear of the body at shoulder height.
         const pp = playerObj.p;
         const dir = combat.aimDirection(pp.camYaw);
+        const rx = -dir.z, rz = dir.x; // right-hand side of the aim
         combat.fire({ x: pp.x + dir.x * 1.2, y: 1.5, z: pp.z + dir.z * 1.2 }, dir, false);
-        combat.forceMuzzle({ x: pp.x + dir.x * 2.4, y: 1.6, z: pp.z + dir.z * 2.4 });
+        combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55, z: pp.z + dir.z * 1.6 + rz * 1.0 });
       }
       if (shotName === 'cover') input.hold('KeyW', false);
       window.__shotReady = true;
@@ -187,14 +209,31 @@ function frame() {
   if (shotName === 'combat' && window.__shotReady) {
     const pp = playerObj.p;
     const dir = combat.aimDirection(pp.camYaw);
-    combat.forceMuzzle({ x: pp.x + dir.x * 2.4, y: 1.6, z: pp.z + dir.z * 2.4 });
+    const rx = -dir.z, rz = dir.x;
+    combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55, z: pp.z + dir.z * 1.6 + rz * 1.0 });
   }
 
   if (S.screen === 'title') {
-    // Slow orbit over the city behind the title screen.
-    titleOrbit += dt * 0.03;
-    camera.position.set(Math.cos(titleOrbit) * 170, 55, Math.sin(titleOrbit) * 170);
-    camera.lookAt(0, 0, 0);
+    if (shotName === 'title') {
+      // Staged title: street level on the marina road, Rook + his
+      // Peregrine in the foreground, the ferris wheel looming behind
+      // them against the sunset sky. (v3 was a 70 m aerial of the whole
+      // city — no character, no car, no wheel.) Low camera (y 2.5) on
+      // the x=228 road at (228,2.5,280): Rook 7 m out reads ~180 px
+      // tall with his feet still in frame (a higher camera cut them
+      // off at this distance), the wheel 51 m out, near face-on (its
+      // disc faces ±z). The sun disc itself is behind the camera (WSW)
+      // — the sunset reads through the orange sky gradient and the warm
+      // light, as in R3's title. The DOM leaves the centre of the frame
+      // clear for this stage (see style.css).
+      camera.position.set(228, 2.5, 280);
+      camera.lookAt(238, 9, 335);
+    } else {
+      // Slow orbit over the city behind the title screen.
+      titleOrbit += dt * 0.03;
+      camera.position.set(Math.cos(titleOrbit) * 170, 55, Math.sin(titleOrbit) * 170);
+      camera.lookAt(0, 0, 0);
+    }
     traffic.update(dt, { x: 0, z: 0 }, null);
     peds.update(dt, null, { x: 0, z: 0 });
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());

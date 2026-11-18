@@ -27,14 +27,18 @@ export function facadeTexture(seed, floors) {
   const rng = makeRng(seed);
   const pal = rng.pick(FACADE_PALETTES);
   const base = pal[0], trim = pal[2];
-  return canvasTexture(128, 256, (g) => {
+  // Paint the day map and the night emissive map in one pass, from the
+  // same RNG calls in the same order, so the lit windows and the
+  // shopfront line up pixel-perfect between the two. The emissive map is
+  // black except for what glows after dark: lit windows + shopfront.
+  const map = canvasTexture(128, 256, (g) => {
     g.fillStyle = base; g.fillRect(0, 0, 128, 256);
     g.fillStyle = trim; g.fillRect(0, 0, 128, 10); g.fillRect(0, 246, 128, 10);
     const cols = 4;
     for (let f = 0; f < floors; f++) {
       for (let c = 0; c < cols; c++) {
         const x = 8 + c * 30, y = 22 + f * Math.floor(210 / floors);
-        const lit = rng.chance(0.45);
+        const lit = rng.chance(0.6);
         g.fillStyle = lit ? '#ffe9a8' : '#2c3a4d';
         g.fillRect(x, y, 20, 26);
         g.fillStyle = 'rgba(255,255,255,0.25)';
@@ -48,6 +52,26 @@ export function facadeTexture(seed, floors) {
     g.fillStyle = '#14181f'; g.font = 'bold 13px sans-serif'; g.textAlign = 'center';
     g.fillText(rng.pick(['MARKET', 'TACOS', 'SURF', 'BAR', 'HOTEL', 'PIER 9', 'RAMEN', 'DIVE']), 64, 232);
   });
+  // Replay the identical RNG sequence for the emissive map: same palette
+  // pick, same per-window lit rolls, same stripe pick (the shop name pick
+  // is consumed too, to keep the sequence aligned, though the name itself
+  // is not drawn — the stripe glows solid).
+  const rng2 = makeRng(seed);
+  rng2.pick(FACADE_PALETTES);
+  const emissive = canvasTexture(128, 256, (g) => {
+    g.fillStyle = '#000000'; g.fillRect(0, 0, 128, 256);
+    const cols = 4;
+    for (let f = 0; f < floors; f++) {
+      for (let c = 0; c < cols; c++) {
+        const x = 8 + c * 30, y = 22 + f * Math.floor(210 / floors);
+        if (rng2.chance(0.6)) { g.fillStyle = '#ffe9a8'; g.fillRect(x, y, 20, 26); }
+      }
+    }
+    const stripe2 = rng2.pick(['#ff5d8f', '#4de3ff', '#ffd166', '#7ddf8e']);
+    rng2.pick(['MARKET', 'TACOS', 'SURF', 'BAR', 'HOTEL', 'PIER 9', 'RAMEN', 'DIVE']);
+    g.fillStyle = stripe2; g.fillRect(6, 216, 116, 22);
+  });
+  return { map, emissive };
 }
 
 export function roadTexture() {
@@ -97,11 +121,21 @@ export function waterTexture() {
 }
 
 export function signTexture(text, fg, bg) {
-  return canvasTexture(256, 64, (g) => {
-    g.fillStyle = bg; g.fillRect(0, 0, 256, 64);
-    g.strokeStyle = fg; g.lineWidth = 4; g.strokeRect(4, 4, 248, 56);
-    g.fillStyle = fg; g.font = 'bold 30px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText(text, 128, 34);
+  // Auto-fit: shrink the font until the whole text fits the canvas with a
+  // margin, so a long name (KESTREL LAGOON) is never clipped at the edges
+  // the way it was on the 256x64 canvas.
+  return canvasTexture(512, 128, (g) => {
+    g.fillStyle = bg; g.fillRect(0, 0, 512, 128);
+    g.strokeStyle = fg; g.lineWidth = 6; g.strokeRect(6, 6, 500, 116);
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    let size = 72;
+    g.font = `bold ${size}px sans-serif`;
+    while (g.measureText(text).width > 470 && size > 12) {
+      size -= 2;
+      g.font = `bold ${size}px sans-serif`;
+    }
+    g.fillStyle = fg;
+    g.fillText(text, 256, 68);
   });
 }
 
