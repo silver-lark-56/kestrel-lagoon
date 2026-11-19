@@ -167,6 +167,18 @@ export function stageShot(shot, ctx) {
       e.mesh.position.set(ex, 0, ez);
     });
     player.teleport(-76, -230, Math.PI); // on the Quay road, facing the NEON QUAY sign
+    // Rook scaled up for the combat frame only (1.35 vs the 1.05 he
+    // ships with — 1.29x, ~175 px to ~225 px): the same staging-scale
+    // trick as the title shot (v6), which worked without distortion.
+    // Combat is the last shot still losing thin to R3 (~300 px player
+    // over-shoulder, daytime, dynamic pose). The mesh origin is at
+    // ground level, so his feet stay planted; nothing in the player
+    // update touches mesh.scale, so the scale survives the staging
+    // frames. The muzzle flash and tracer heights in main.js track
+    // this scale (relative mesh scale), so the flash stays at the
+    // gun's shoulder height instead of dropping to his waist.
+    // Gameplay is untouched — this branch only runs with ?shot=combat.
+    if (player.p.mesh) player.p.mesh.scale.setScalar(1.35);
     player.p.camPitch = 0.18; // shallow: the sign stays in frame above the street
     // Closer chase camera (7 m vs the default 9 m): Rook reads ~200 px
     // tall instead of ~120 px — R1's player is ~250 px, R3's ~300 px,

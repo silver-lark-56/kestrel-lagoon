@@ -76,6 +76,14 @@ export function createRender(canvas) {
   const nightAmbient = new THREE.AmbientLight(0x334466, 0);
   scene.add(nightAmbient);
 
+  // Combat-shot light lift (v7): the combat frame is the darkest of
+  // the four and R3's combat shot is brighter/cleaner (K3). Only with
+  // ?shot=combat — never in real play, the selftest, or any other
+  // shot. Neon signs and lamps are emissive, so they keep their
+  // punch; only the lit surfaces (street, buildings, characters)
+  // lift. Computed once: applyTimeOfDay runs every frame.
+  const combatBoost = new URLSearchParams(window.location.search).get('shot') === 'combat';
+
   let lampMat = null;
   function bindLamps(mat) { lampMat = mat; }
   let facadeMats = [];
@@ -86,10 +94,10 @@ export function createRender(canvas) {
     const sky = new THREE.Color();
     if (isNight) {
       sky.copy(SKY_NIGHT);
-      hemi.intensity = 0.55;
+      hemi.intensity = combatBoost ? 0.7 : 0.55;
       sun.intensity = 0.4;
       sun.color.set(0x8fa8ff);
-      nightAmbient.intensity = 0.65;
+      nightAmbient.intensity = combatBoost ? 0.9 : 0.65;
       if (lampMat) lampMat.color.set(0xffe9a8);
     } else if (isSunset) {
       sky.copy(SKY_SUNSET).lerp(SKY_DUSK, 0.35);

@@ -183,7 +183,13 @@ function frame() {
       // Keep the firefight live while staging.
       const pp = playerObj.p;
       const dir = combat.aimDirection(pp.camYaw);
-      combat.fire({ x: pp.x + dir.x * 1.2, y: 1.5, z: pp.z + dir.z * 1.2 }, dir, false);
+      // Muzzle/tracer heights track the staged mesh scale (v7: Rook is
+      // 1.35x in the combat frame, so his shoulder is ~1.95 m, not
+      // 1.5 m). Relative scale — 1.0 in normal play, so gameplay is
+      // untouched; the raycast is 2D, so the raised origin cannot
+      // change hits.
+      const ms = pp.mesh.scale.x / 1.05;
+      combat.fire({ x: pp.x + dir.x * 1.2, y: 1.5 * ms, z: pp.z + dir.z * 1.2 }, dir, false);
     }
     const needFrames = (shotName === 'title' || shotName === 'map') ? 4 : 16;
     if (shotFrames >= needFrames) {
@@ -196,8 +202,9 @@ function frame() {
         const pp = playerObj.p;
         const dir = combat.aimDirection(pp.camYaw);
         const rx = -dir.z, rz = dir.x; // right-hand side of the aim
-        combat.fire({ x: pp.x + dir.x * 1.2, y: 1.5, z: pp.z + dir.z * 1.2 }, dir, false);
-        combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55, z: pp.z + dir.z * 1.6 + rz * 1.0 });
+        const ms = pp.mesh.scale.x / 1.05; // staged mesh scale (v7 combat: 1.29x)
+        combat.fire({ x: pp.x + dir.x * 1.2, y: 1.5 * ms, z: pp.z + dir.z * 1.2 }, dir, false);
+        combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55 * ms, z: pp.z + dir.z * 1.6 + rz * 1.0 });
       }
       if (shotName === 'cover') input.hold('KeyW', false);
       window.__shotReady = true;
@@ -210,7 +217,8 @@ function frame() {
     const pp = playerObj.p;
     const dir = combat.aimDirection(pp.camYaw);
     const rx = -dir.z, rz = dir.x;
-    combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55, z: pp.z + dir.z * 1.6 + rz * 1.0 });
+    const ms = pp.mesh.scale.x / 1.05; // staged mesh scale (v7 combat: 1.29x)
+    combat.forceMuzzle({ x: pp.x + dir.x * 1.6 + rx * 1.0, y: 1.55 * ms, z: pp.z + dir.z * 1.6 + rz * 1.0 });
   }
 
   if (S.screen === 'title') {
