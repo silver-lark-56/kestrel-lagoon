@@ -203,5 +203,20 @@ export function createPedestrians(scene, seed, colliders) {
     ped.mesh.position.y = 0.4;
   }
 
-  return { peds, update, nearestPed, killPed, spawnPed };
+  // v8d #12: scare — every ped inside the radius runs from the point
+  // for `seconds` (the horn, neonbay pattern). Returns how many fled.
+  function scare(x, z, radius, seconds) {
+    let n = 0;
+    for (const p of peds) {
+      if (p.dead || p.fleeing > 0) continue;
+      if (Math.hypot(p.x - x, p.z - z) < radius) {
+        p.fleeing = seconds;
+        p.fleeFrom = { x, z };
+        n++;
+      }
+    }
+    return n;
+  }
+
+  return { peds, update, nearestPed, killPed, spawnPed, scare };
 }

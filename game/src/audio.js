@@ -120,6 +120,10 @@ export function createAudio() {
     gunshot() { noiseBurst(0.12, 0.5, false); blip(160, 0.08, 'square', 0.2); },
     punch() { noiseBurst(0.08, 0.3, true); },
     crash() { noiseBurst(0.3, 0.5, true); blip(70, 0.25, 'sawtooth', 0.25); },
+    // v8d #10: a car explosion — long low noise + a sub sine drop.
+    explosion() { noiseBurst(0.8, 0.9, true); blip(60, 0.7, 'sine', 0.5); },
+    // v8d #12: a dual-tone car horn (two detuned saws, 0.4 s).
+    horn() { blip(370, 0.4, 'sawtooth', 0.18); blip(466, 0.4, 'sawtooth', 0.18); },
     thunder() { noiseBurst(2.2, 0.5, true); blip(48, 1.8, 'sine', 0.25); },
     // Rain ambience: one looping filtered-noise source, gain follows the
     // weather intensity. Created lazily on the first rain — while dry,

@@ -85,9 +85,15 @@ export function createTouchControls(input) {
   }
   addButton('touch-fire', 'FIRE', 'big', () => input.setFiring(true), () => input.setFiring(false));
   addButton('touch-enter', 'F', 'mid', () => input.inject('KeyF'));
-  addButton('touch-brake', 'BRAKE', 'mid', () => input.hold('Space', true), () => input.hold('Space', false));
+  // v8d P1 #17: the BRAKE button holds Space, which is JUMP on foot —
+  // the label follows S.inCar (relabeled in update() below).
+  const brakeBtn = addButton('touch-brake', 'BRAKE', 'mid', () => input.hold('Space', true), () => input.hold('Space', false));
   addButton('touch-cam', 'CAM', 'small', () => input.inject('KeyV'));
   addButton('touch-interact', 'E', 'small', () => input.inject('KeyE'));
+  addButton('touch-horn', 'HORN', 'small', () => input.inject('KeyH')); // v8d #12
+  // v8d P1 #20: hold WHEEL to open the weapon wheel (same held-key
+  // pattern as BRAKE); tap a segment chip to equip it.
+  addButton('touch-wheel', 'WHEEL', 'small', () => input.hold('Tab', true), () => input.hold('Tab', false));
   addButton('touch-map', 'MAP', 'small', () => input.inject('KeyM'));
   addButton('touch-pause', 'II', 'small', () => input.inject('Escape'));
 
@@ -193,6 +199,7 @@ export function createTouchControls(input) {
   // starting at false would skip it (want === visible) and leave the
   // layer visible on the title screen.
   let visible = null;
+  let brakeLabel = null; // v8d P1 #17: BRAKE in a car, JUMP on foot
   function update() {
     // The touch layer mirrors the HUD: visible only while playing. Menus
     // (title / pause / map / stats) are tapped directly.
@@ -207,6 +214,9 @@ export function createTouchControls(input) {
         input.hold('Space', false);
       }
     }
+    // v8d P1 #17: Space is jump on foot, handbrake in a car.
+    const label = S.inCar ? 'BRAKE' : 'JUMP';
+    if (label !== brakeLabel) { brakeLabel = label; brakeBtn.textContent = label; }
   }
   update();
 

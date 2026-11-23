@@ -14,6 +14,7 @@ export function createPlayer(scene) {
     mesh, x: -200, z: 140, heading: Math.PI * 0.25, walkPhase: 0,
     camYaw: Math.PI * 0.25, camPitch: 0.32, camDist: 9,
     aiming: false, speed: 0,
+    y: 0, vy: 0, // v8d P1 #17: jump height + vertical velocity (ground = 0)
     fov: 62, // v8c #21: damped field of view (62 normal, 50 aiming, up to 78 at speed)
     idleT: 0, // v8c #21: seconds since the last mouse move (drives the gentle recentre)
     mouseActive: false, // v8c #21: this frame's mouse delta exceeded the lock-on threshold
@@ -57,6 +58,18 @@ export function createPlayer(scene) {
         p.walkPhase += dt * (sprint > 1 ? 11 : 7);
       }
       S.stats.distanceWalked += len * dt;
+      // v8d P1 #17: jump (gta-clone vy 7.5, js/main.js:1011-1037) —
+      // Space on foot (the same key is the handbrake in a car, and
+      // this update never runs while driving, so there is no
+      // conflict). Gravity 22: apex ~1.3 m, airtime ~0.7 s. Holding
+      // Space jumps again on landing. No fall damage: the world is
+      // flat and the jump is 1.3 m.
+      if (input.handbrake && p.y === 0) p.vy = 7.5;
+      if (p.y > 0 || p.vy > 0) {
+        p.vy -= 22 * dt;
+        p.y += p.vy * dt;
+        if (p.y <= 0) { p.y = 0; p.vy = 0; }
+      }
       // v8c #21 (fable): gentle recentre behind the player — only while
       // moving and only after 1.6 s of mouse idle, so it never fights
       // the player. Never while aiming: the aim holds the camera.
@@ -69,10 +82,12 @@ export function createPlayer(scene) {
     }
     const u = mesh.userData;
     const swing = p.speed > 0.5 ? Math.sin(p.walkPhase) * 0.6 : 0;
-    u.legL.rotation.x = swing; u.legR.rotation.x = -swing;
+    // v8d P1 #17: tucked legs while airborne, walk swing on the ground.
+    if (p.y > 0) { u.legL.rotation.x = 0.7; u.legR.rotation.x = -0.4; }
+    else { u.legL.rotation.x = swing; u.legR.rotation.x = -swing; }
     u.armL.rotation.x = p.aiming ? -1.2 : -swing;
     u.armR.rotation.x = p.aiming ? -1.2 : swing;
-    mesh.position.set(p.x, 0, p.z);
+    mesh.position.set(p.x, p.y, p.z);
     mesh.rotation.y = p.aiming ? p.camYaw : p.heading;
     mesh.visible = !S.inCar;
     return p;
@@ -146,7 +161,9 @@ export function createPlayer(scene) {
       height = 4.2;
       target.set(carPos.x, 1.5, carPos.z);
     } else {
-      target.set(p.x, 1.6, p.z);
+      // v8d P1 #17: the look target rises half the jump height so the
+      // camera follows a jump instead of framing empty ground.
+      target.set(p.x, 1.6 + p.y * 0.5, p.z);
       // On foot the follow distance is p.camDist (default 9): staged
       // shots override it (the combat shot pulls in to 6 m so Rook
       // reads ~200 px, R1/R3-sized, instead of ~120 px). Aiming keeps
@@ -207,6 +224,7 @@ export function createPlayer(scene) {
 
   function teleport(x, z, heading) {
     p.x = x; p.z = z;
+    p.y = 0; p.vy = 0; // v8d P1 #17: never teleport mid-air
     if (heading !== undefined) {
       p.heading = heading; p.camYaw = heading;
       // Orient the mesh too: on the title screen update() never runs,

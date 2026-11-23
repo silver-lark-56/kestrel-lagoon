@@ -3,16 +3,17 @@
 // respawn, and drives the ?shot= staging and the ?selftest= scripted check.
 import * as THREE from 'three';
 import { S, freshState, resetState, loadFromSlot, saveToSlot, loadSettings, saveSettings, showToast } from './state.js';
-import { createInput, weaponSlotOf, ACT_ENTER, ACT_RELOAD, ACT_MAP, ACT_PAUSE, ACT_INTERACT, ACT_RADIO_PREV, ACT_CAMERA, ACT_CREW_CYCLE, ACT_CREW_ABILITY, ACT_CREW_SELECT, ACT_GRAPHICS } from './input.js';
+import { createInput, weaponSlotOf, ACT_ENTER, ACT_RELOAD, ACT_MAP, ACT_PAUSE, ACT_INTERACT, ACT_RADIO_PREV, ACT_CAMERA, ACT_CREW_CYCLE, ACT_CREW_ABILITY, ACT_CREW_SELECT, ACT_GRAPHICS, ACT_HORN } from './input.js';
 import { createAudio } from './audio.js';
 import { createRender } from './render.js';
-import { buildCity } from './city.js';
+import { buildCity, nearestRoadPoint } from './city.js';
 import { createTraffic } from './vehicles.js';
 import { createPedestrians } from './pedestrians.js';
 import { createPlayer } from './player.js';
 import { createDriving } from './driving.js';
 import { createPolice } from './police.js';
 import { createCombat } from './combat.js';
+import { createWheel } from './wheel.js'; // v8d P1 #20: radial weapon wheel
 import { createCrew } from './crew.js';
 import { createMissions } from './missions.js';
 import { createActivities } from './activities.js';
@@ -68,6 +69,14 @@ const playerObj = createPlayer(scene);
 const police = createPolice(scene, city.colliders, audio);
 const driving = createDriving(scene, traffic, peds, audio, police);
 const combat = createCombat(scene, camera, audio, police, peds);
+police.setCombat(combat); // v8d #3: foot cops + the heli gunner shoot via combat
+police.setPeds(peds); // v8d P1 #18R: the witness check needs the live civilians
+// v8d P1 #20: the weapon wheel — hold Tab to open, release to equip.
+// switchWeapon owns the unowned-weapon refusal + the switch toast.
+const wheel = createWheel({
+  getState: () => ({ owned: S.ownedWeapons, index: S.weaponIndex, ammo: S.ammo }),
+  onSelect: (slot) => combat.switchWeapon(slot),
+});
 const crew = createCrew(scene, city.colliders, driving, police);
 const missions = createMissions({ city, driving, combat, police, crew, traffic, audio });
 const activities = createActivities({ city, driving, police, audio });
@@ -100,7 +109,7 @@ const ctx = { city, traffic, peds, player: playerObj, driving, police, combat, c
 // the touch layer is live, or the weather is raining, without reaching
 // into module internals.
 window.__probe = {
-  player: () => ({ x: playerObj.p.x, z: playerObj.p.z }),
+  player: () => ({ x: playerObj.p.x, z: playerObj.p.z, y: Math.round(playerObj.p.y * 100) / 100 }),
   camYaw: () => playerObj.p.camYaw,
   camera: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
   speedKmh: () => S.speedKmh,
@@ -114,6 +123,62 @@ window.__probe = {
   lock: () => combat.lockTarget,
   fov: () => playerObj.p.fov,
   stores: () => stores.state(),
+  // v8d: wanted level, unit states, ram log, foot cops, bust state.
+  police: () => police.probeState(),
+  // v8d: health + the live banner (BUSTED / WASTED) for the probe.
+  hp: () => S.health,
+  banner: () => (S.banner ? S.banner.text : null),
+  // v8d #8: mission state + the fail sequence for the soft-lock probe.
+  mission: () => ({ active: S.jobActive, id: missions.currentJobId(),
+    stage: S.stageIndex, kills: S.stageKills, fail: missions.failState(),
+    enemies: combat.enemies.length }),
+  // v8d #10: car damage stage for the damage probe.
+  car: () => driving.probeState(),
+  // v8d #11: enemy HP + headshot count for the headshot probe.
+  combat: () => combat.probeState(),
+  // v8d #12: fleeing peds for the horn probe.
+  // v8d P1 #18R: live ped positions for the witness probe (finding an
+  // empty spot, and a ped to stand next to).
+  peds: () => ({ fleeing: peds.peds.filter((p) => p.fleeing > 0).length, total: peds.peds.length,
+    live: peds.peds.filter((p) => !p.dead).map((p) => ({ x: Math.round(p.x), z: Math.round(p.z) })) }),
+  // v8d #13: weapons + cash for the BUSTED probe (confiscation check).
+  weapons: () => ({ owned: S.ownedWeapons.slice(), index: S.weaponIndex, cash: S.cash,
+    ammo: S.ammo.map((a) => ({ mag: a.mag, reserve: a.reserve })) }), // v8d P1 #19: ammo for the grenade probe
+  // v8d #14: nearest PARKED car for the ram probe (homing + carjack).
+  // Parked only — a moving traffic car cannot be caught on foot.
+  nearestCar: () => {
+    let best = null, bd = 250;
+    for (const c of traffic.cars) {
+      if (!c.parked) continue;
+      const d = Math.hypot(c.x - playerObj.p.x, c.z - playerObj.p.z);
+      if (d < bd) { bd = d; best = c; }
+    }
+    return best ? { x: Math.round(best.x), z: Math.round(best.z), dist: Math.round(bd) } : null;
+  },
+  // v8d #14: CDP-verification hooks for the soft-lock probe — the same
+  // powers the in-game self-test already uses internally (startJob +
+  // teleport), exposed so an external probe can put the player in a
+  // kill stage without playing two whole jobs first. Not reachable
+  // from gameplay (CDP Runtime.evaluate only).
+  startJob: (id) => { missions.startJob(id); return missions.currentJobId(); },
+  teleport: (x, z) => { playerObj.teleport(x, z, 0); return { x: playerObj.p.x, z: playerObj.p.z }; },
+  // v8d P1 #18R: CDP-verification hooks for the witness probe — clear
+  // the wanted level (so a reported shot can be retried clean) and
+  // place a cop unit on the nearest road (the only way to have a cop
+  // present while clean: live units stand down and drive off at
+  // 0 stars). Not reachable from gameplay (CDP Runtime.evaluate only).
+  clearWanted: () => { police.clearAll(); return S.wanted; },
+  spawnCop: (x, z) => { police.placeUnitAt(x, z, playerObj.p.x, playerObj.p.z, {}); return police.probeState().units.length; },
+  // v8d P1 #20: weapon state + the wheel for the grenade/wheel probes.
+  wheel: () => wheel.probeState(),
+  // (buying through Harbor Arms needs cash the probe does not have).
+  // Not reachable from gameplay (CDP Runtime.evaluate only).
+  giveWeapon: (i) => {
+    if (i < 0 || i >= 6) return null;
+    if (!S.ownedWeapons.includes(i)) S.ownedWeapons.push(i);
+    combat.switchWeapon(i);
+    return { owned: S.ownedWeapons.slice(), index: S.weaponIndex };
+  },
 };
 
 let lastTime = performance.now() / 1000;
@@ -124,8 +189,16 @@ let selftest = selftestFromURL();
 // capture must never depend on a saved Ultra setting (bloom on) from an
 // earlier session. In-memory only — nothing here persists the override.
 if (shotName || selftest) { S.graphics = 'high'; graphics.setPreset('high'); }
+// v8d: staged captures run the pre-v8d police behaviour exactly, so the
+// four final shots cannot change. The self-test runs live (its 'shoot'
+// step needs real heat), so it is NOT staging.
+police.setStaging(!!shotName);
+driving.setStaging(!!shotName);
 let shotFrames = 0;
 let deathTimer = 0;
+let lastHpSeen = 100; // v8d #9: tracks HP drops (any damage source)
+let lastDamageAt = 0; // v8d #9: game seconds of the last HP drop
+let lastHonkAt = 0; // v8d #12: horn cooldown (0.6 s)
 let prevPlayerPos = null; // previous frame's player position, for the police pursuit lead
 
 // Self-test state (declared up here: startSelftest runs during boot, below).
@@ -178,7 +251,9 @@ function expireTimedUI(now) {
 
 function handleActions(actions) {
   const slot = weaponSlotOf(actions);
-  if (slot >= 0) combat.switchWeapon(slot);
+  // v8d P1 #20: a number key switches directly AND closes the wheel —
+  // the keys stay the fast path even while the wheel is open.
+  if (slot >= 0) { combat.switchWeapon(slot); wheel.close(); }
   // v8c #14: while the player is inside a shop, the world-facing
   // position is the shop door (map, jobs, outdoor shop trigger) — the
   // real position is the room at x = 3000.
@@ -202,13 +277,20 @@ function handleActions(actions) {
     if (S.screen === 'map') screens.hideAll();
     else if (S.screen === 'game') screens.openMap(worldPos);
   }
-  if (actions & ACT_PAUSE) {
+  // v8d #8: while the retry prompt is up, E retries the failed job
+  // and Esc quits it — the normal pause / interact handling below is
+  // suppressed so one keypress cannot do two things.
+  if (missions.isPrompting()) {
+    if (actions & ACT_INTERACT) missions.retryFail();
+    else if (actions & ACT_PAUSE) missions.quitFail();
+  }
+  if (actions & ACT_PAUSE && !missions.isPrompting()) {
     if (S.screen === 'game') screens.show('pause-screen');
     else if (S.screen === 'pause') screens.hideAll();
     else if (S.screen === 'map') screens.hideAll();
     else if (S.screen === 'controls' || S.screen === 'settings' || S.screen === 'stats' || S.screen === 'showroom') screens.show('title-screen');
   }
-  if (actions & ACT_INTERACT) {
+  if (actions & ACT_INTERACT && !missions.isPrompting()) {
     // v8c #14: at a shop counter inside, E shops there; otherwise the
     // outdoor proximity shop (or a nearby job marker) as before.
     const shop = stores.counterShop({ x: playerObj.p.x, z: playerObj.p.z })
@@ -234,17 +316,33 @@ function handleActions(actions) {
     saveSettings();
     showToast(`Graphics: ${PRESETS[name].label}`);
   }
+  // v8d #12: horn (H / HORN button) — a dual-tone honk that scatters
+  // nearby peds (neonbay: horn scares peds within 25 m). In-car only,
+  // 0.6 s cooldown so it cannot be held into a drone.
+  if (actions & ACT_HORN && S.inCar) {
+    const t = performance.now() / 1000;
+    if (t - lastHonkAt > 0.6) {
+      lastHonkAt = t;
+      audio.horn();
+      peds.scare(worldPos.x, worldPos.z, 25, 2);
+    }
+  }
 }
 
 function frame() {
   requestAnimationFrame(frame);
   window.__frames = (window.__frames || 0) + 1;
   const now = performance.now() / 1000;
-  const dt = Math.min(0.05, Math.max(0.001, now - lastTime));
+  // v8d P1 #20: time runs at 20% while the weapon wheel is open —
+  // the world keeps moving, slowly, like GTA V's wheel slow-mo.
+  const dt = Math.min(0.05, Math.max(0.001, now - lastTime)) * wheel.timeScale();
   lastTime = now;
 
   const inGame = S.screen === 'game';
   const frozen = !inGame && S.screen !== 'title';
+  // v8d P1 #20: leaving the game screen (pause / map / death) closes
+  // the wheel — it must never sit open behind a menu.
+  if (!inGame && wheel.isOpen()) wheel.close();
 
   // The title stage light is on only for the staged title shot — never
   // in normal play (orbit title) or in game.
@@ -346,6 +444,15 @@ function frame() {
   if (!frozen) {
     const actions = input.takeActions();
     if (inGame) handleActions(actions);
+    // v8d P1 #20: hold Tab (or the WHEEL touch button) to open the
+    // wheel; release to equip the highlighted weapon. While it is
+    // open the look deltas are discarded, freezing the camera the way
+    // GTA V does — the mouse steers the wheel cursor, not the view.
+    if (inGame) {
+      if (input.wheelHeld && !wheel.isOpen()) wheel.open();
+      else if (!input.wheelHeld && wheel.isOpen()) wheel.confirm();
+      if (wheel.isOpen()) input.takeMouse();
+    }
 
     const pp = playerObj.p;
     // Movement: on foot or driving.
@@ -385,7 +492,9 @@ function frame() {
     }
 
     // Firing (mouse held): on foot, or drive-by from the car.
-    if (inGame && input.firing) {
+    // v8d P1 #20: never while the weapon wheel is open — a click
+    // there is a segment tap, not a shot.
+    if (inGame && input.firing && !wheel.isOpen()) {
       const dir = combat.aimDirection(pp.camYaw);
       const origin = S.inCar
         ? { x: pp.x + dir.x * 2, y: 1.4, z: pp.z + dir.z * 2 }
@@ -406,10 +515,19 @@ function frame() {
       if (vl > 70) { playerVel.x *= 70 / vl; playerVel.z *= 70 / vl; }
     }
     prevPlayerPos = { x: worldPos.x, z: worldPos.z };
-    police.update(dt, worldPos, S.speedKmh, playerVel);
+    // v8d #1: the police need the live car (ram contact) + the damage /
+    // shove callbacks; `car` is hoisted here so the camera / HUD / lights
+    // below reuse the same handle.
+    const car = driving.getCar();
+    police.update(dt, worldPos, S.speedKmh, playerVel, {
+      inCar: S.inCar, heading: car ? car.heading : pp.heading,
+      car, damageCar: (n) => driving.damage(n), shoveCar: (ix, iz, kick) => driving.shove(ix, iz, kick),
+    });
     combat.update(dt, worldPos);
     crew.update(dt, worldPos, S.inCar, combat.enemies);
     missions.update(dt, worldPos);
+    // v8d #8: the MISSION FAILED card sequence (wait → card → prompt).
+    missions.updateFail(now);
     activities.updateClock(dt);
     activities.updateRace(dt, worldPos);
     activities.updateTaxi(dt, worldPos);
@@ -421,11 +539,24 @@ function frame() {
     if (!shotName && !selftest) stores.update(dt, playerPos, S.inCar);
 
     // Camera + sky.
-    const car = driving.getCar();
     playerObj.updateCamera(dt, camera, car ? { x: car.x, z: car.z } : null, car ? car.heading : undefined,
       { staging: !!shotName, speedKmh: S.speedKmh, colliders: S.interior ? stores.colliders : city.colliders });
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());
     city.dynamic.updateTrafficLights(S.clock * 20);
+
+    // v8d #9: health regen (GTA V) — after 5 s without damage, HP
+    // recovers slowly (2/s) up to 50%. Full health still needs the
+    // Boathouse or a respawn. Live play only: staged shots keep
+    // their fixed HP. Any HP drop (enemy or police fire — the only
+    // damage sources) restarts the 5 s clock.
+    if (!shotName && S.health > 0) {
+      if (S.health < lastHpSeen) lastDamageAt = now;
+      lastHpSeen = S.health;
+      if (S.health < 50 && now - lastDamageAt > 5) {
+        S.health = Math.min(50, S.health + 2 * dt);
+        lastHpSeen = S.health;
+      }
+    } else lastHpSeen = S.health;
 
     // Death + respawn.
     if (S.health <= 0) {
@@ -438,6 +569,9 @@ function frame() {
         S.health = 100; S.armour = 0;
         police.clearAll();
         combat.clearEnemies();
+        // v8d #8: dying mid-job fails the mission (MISSION FAILED +
+        // retry) instead of soft-locking the stage.
+        missions.failJob(now);
         driving.destroyCar();
         // Dying inside a shop (v8c #14) drops the player back outside
         // first, so the respawn never leaves a stale interior behind.
@@ -446,6 +580,32 @@ function frame() {
         crew.teleportBeside(-210, 150);
         S.banner = { text: 'WASTED', sub: `The lagoon keeps $${lost.toLocaleString()} of your cash.`, until: now + 3 };
       }
+    }
+
+    // v8d #2/#13: BUSTED — arrested at 1–2 stars (see police.js).
+    // GTA V rules: bail is 10% of cash, weapons + ammo + armour are
+    // confiscated (rebuy at Harbor Arms), and Rook walks out of the
+    // KLPD Harbor Watch precinct. WASTED only takes 10% of cash.
+    if (police.takeBusted()) {
+      const fine = Math.floor(S.cash * 0.1);
+      S.cash -= fine;
+      S.health = 100; S.armour = 0;
+      for (const a of S.ammo) { if (a.mag !== Infinity) { a.mag = 0; a.reserve = 0; } }
+      // v8d #13: the weapons themselves go too (fists only) — the
+      // old handler zeroed the ammo but left the guns owned, so a
+      // busted Rook kept his arsenal and only re-bought bullets.
+      S.ownedWeapons = [0];
+      S.weaponIndex = 0;
+      police.clearAll();
+      combat.clearEnemies();
+      // v8d #8: busted mid-job fails the mission too (leonida: fail
+      // global = wasted/busted).
+      missions.failJob(now);
+      driving.destroyCar();
+      if (S.interior) stores.exit();
+      playerObj.teleport(76, 0, 0);
+      crew.teleportBeside(76, 0);
+      S.banner = { text: 'BUSTED', sub: `KLPD Harbor Watch Precinct — bail $${fine.toLocaleString()}. Weapons + ammo + armour confiscated.`, until: now + 3 };
     }
 
     // HUD.
@@ -499,7 +659,20 @@ function startSelftest() {
   step('exit-car', () => { input.inject('KeyF'); }, () => !S.inCar, 4);
   step('shoot', () => {
     combat.switchWeapon(1);
-    const dir = combat.aimDirection(pp.camYaw);
+    // v8d P1 #18R: gunfire is witness-gated while clean, so fire from
+    // the road beside a pedestrian — a civilian within 25 m reports
+    // it. The road point is always clear of buildings (a sidewalk
+    // teleport could land inside one and block the witness's view).
+    // The shot aims away from the ped so it does not kill the witness.
+    let dir = combat.aimDirection(pp.camYaw);
+    const np = peds.nearestPed(pp.x, pp.z, 500);
+    if (np) {
+      const rp = nearestRoadPoint(np.x, np.z);
+      playerObj.teleport(rp.x, rp.z, 0);
+      const dx = rp.x - np.x, dz = rp.z - np.z;
+      const dl = Math.hypot(dx, dz) || 1;
+      dir = { x: dx / dl, z: dz / dl };
+    }
     combat.fire({ x: pp.x, y: 1.5, z: pp.z }, dir, false);
   }, () => S.stats.shotsFired >= 1 && S.wanted >= 1, 2);
   step('wanted-clear', () => { police.clearAll(); }, () => S.wanted === 0, 2);

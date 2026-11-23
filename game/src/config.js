@@ -105,6 +105,12 @@ export const WEAPONS = [
   { id: 'smg', name: 'WASP SMG', slot: 2, damage: 16, auto: true, range: 45, ammo: 32, reserve: 160, price: 2200 },
   { id: 'shotgun', name: 'BREAKER 12G', slot: 3, damage: 60, auto: false, range: 22, ammo: 6, reserve: 48, price: 1800 },
   { id: 'rifle', name: 'KESTREL AR', slot: 4, damage: 34, auto: true, range: 90, ammo: 30, reserve: 120, price: 3500 },
+  // v8d P1 #19: frag grenade — a thrown explosive (combat.js arcs it,
+  // fuse 1.8 s, blast radius 9 m, damage 120 at the centre falling to
+  // 0 at the edge). mag = grenades ready, reserve = the pouch; the
+  // shop + reload + HUD ammo code all work unchanged. Bought last
+  // (the shop sells in WEAPONS order).
+  { id: 'grenade', name: 'FRAG GRENADE', slot: 5, damage: 120, auto: false, range: 40, ammo: 4, reserve: 12, price: 1500 },
 ];
 
 export const VEHICLE_MODELS = [
