@@ -8,6 +8,7 @@ import { POLICE_UNITS } from './config.js';
 import { buildCarMesh, modelById } from './vehicles.js';
 import { resolveCircle, nearestRoadPoint } from './city.js';
 import { nearestNode, astar, nodePos, lineOfSight } from './road-graph.js';
+import { createFootCop, removeFootCop, updateFootCop, createArrest } from './police-ai.js';
 
 const UNIT_STATES = ['PURSUIT', 'RAMMING', 'ROADBLOCK', 'SEARCHING'];
 
@@ -27,6 +28,9 @@ const HIDDEN_INSIDE_MULTIPLIER = 1.5;
 // you over the line and a big crime can jump two stars at once.
 const HEAT = { gunfire: 34, hitPed: 34, killPed: 80, carjack: 50, attackCop: 100, killCop: 150, explosion: 100 };
 const COPS_PER_STAR = [0, 1, 2, 4, 6, 8]; // fable dispatch table
+// v8d #5: stars drop after this many seconds unseen per star (fable's
+// 25/40/60/90/120 — the old 14+4/star cooled far too fast).
+const DECAY_SECONDS = [0, 25, 40, 60, 90, 120];
 const HEAT_MAX = 500;
 const bandMin = (stars) => (stars <= 0 ? 0 : 34 + (stars - 1) * 100);
 const starsFromHeat = (h) => (h < 34 ? 0 : Math.min(5, 1 + Math.floor((h - 34) / 100)));
@@ -36,6 +40,62 @@ export function createPolice(scene, colliders, audio) {
   let heli = null; // {group, angle, spotlight}
   let spawnTimer = 0;
   let unitCounter = 0;
+  // v8d: staging (?shot=) runs the exact pre-v8d police behaviour, so
+  // the four final shots cannot change — every v8d behaviour below is
+  // gated on !staging. main.js sets this at boot.
+  let staging = false;
+  // v8d #1: counted ram contacts (unit -> player car), with the last
+  // few in ramLog for the probe + the dossier-visible HUD. A contact
+  // counts once per 0.8 s per unit (u.ramCooldown), not once per frame.
+  let ramCount = 0;
+  const ramLog = [];
+  // v8d #2: foot cops (bailed officers) + the arrest timer.
+  const footCops = [];
+  const arrest = createArrest();
+  let bustedFlag = false;
+  let arrestPrompted = false;
+  // v8d #3: combat is created after police in main.js, so it arrives
+  // via setCombat (same one-time wiring pattern as setStaging).
+  let combatRef = null;
+  // v8d P1 #18R: pedestrians arrive the same way (main.js wires them at
+  // boot) — the witness check needs the live civilian list.
+  let peds = null;
+
+  // v8d P1 #18R — WITNESS SYSTEM (re-implemented in this recorded
+  // session; the first #18 commit could not be sealed after the VM
+  // restart killed its recording). gta-clone pattern: a crime with no
+  // witness has a 50% chance of going unreported. Leonida pattern: a
+  // cop within 40 m sees it directly, a civilian within 25 m phones
+  // it in. Minor crimes only — attacking or killing a cop is always
+  // reported. The gate runs only while the player is NOT already
+  // wanted: once the heat is on, every crime counts (the police
+  // already know where to look). Staging is exempt (pre-v8d behaviour).
+  const WITNESS_GATED = { gunfire: true, hitPed: true, killPed: true, carjack: true, explosion: true };
+  const COP_WITNESS_RANGE = 40;
+  const PED_WITNESS_RANGE = 25;
+  let lastCrime = null; // { type, witness, reported } — probe-visible.
+
+  function witnessAt(x, z) {
+    // A cop unit or a live foot cop within 40 m with a clear line of sight.
+    for (const u of units) {
+      const d = Math.hypot(u.x - x, u.z - z);
+      if (d <= COP_WITNESS_RANGE && lineOfSight(colliders, u.x, u.z, x, z)) return 'cop';
+    }
+    for (const c of footCops) {
+      if (c.dead) continue;
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d <= COP_WITNESS_RANGE && lineOfSight(colliders, c.x, c.z, x, z)) return 'cop';
+    }
+    // A living civilian within 25 m with a clear line of sight phones it in.
+    if (peds) {
+      for (const p of peds.peds) {
+        if (p.dead) continue;
+        const d = Math.hypot(p.x - x, p.z - z);
+        if (d <= PED_WITNESS_RANGE && lineOfSight(colliders, p.x, p.z, x, z)) return 'civilian';
+      }
+    }
+    return null;
+  }
 
   function wantedTarget() {
     return COPS_PER_STAR[S.wanted] || 0; // units on the street per star
@@ -63,10 +123,70 @@ export function createPolice(scene, colliders, audio) {
   }
 
   // The crime path: add heat, derive stars, leave a hot scene.
+  // v8d #4: per-crime cooldowns (leonida pattern) — a held trigger
+  // counts as repeated gunfire, but not once per bullet; spraying a
+  // cop raises the heat once per 2 s, not once per hit.
+  const CRIME_COOLDOWN = { gunfire: 0.5, attackCop: 2 };
+  const crimeCooldownUntil = {};
   function commitCrime(type, why, pos = null) {
+    const cd = CRIME_COOLDOWN[type] || 0;
+    if (cd > 0) {
+      const now = performance.now() / 1000;
+      if (crimeCooldownUntil[type] !== undefined && now < crimeCooldownUntil[type]) return;
+      crimeCooldownUntil[type] = now + cd;
+    }
+    // v8d P1 #18R: a minor crime committed while clean is only reported
+    // when someone sees it. With no witness, a coin flip decides
+    // whether it goes unreported — an unreported crime adds no heat
+    // and leaves no hot scene. The toast names the surprising outcome
+    // so the player learns the rule instead of reading it as a bug.
+    if (!staging && S.wanted === 0 && WITNESS_GATED[type]) {
+      const cx = pos ? pos.x : S.playerX;
+      const cz = pos ? pos.z : S.playerZ;
+      const witness = witnessAt(cx, cz);
+      if (!witness && Math.random() < 0.5) {
+        lastCrime = { type, witness: null, reported: false };
+        showToast('No one saw that');
+        return;
+      }
+      lastCrime = { type, witness: witness || 'none', reported: true };
+    } else {
+      lastCrime = { type, witness: 'always', reported: true };
+    }
     S.heat = Math.min(HEAT_MAX, S.heat + (HEAT[type] || 0));
     setStars(starsFromHeat(S.heat), why);
     if (pos) addHotScene(pos.x, pos.z);
+  }
+
+  // v8d #4: every shot counts (the old fire() only reported gunfire
+  // while clean, so sustained shooting never raised the heat). The
+  // 0.5 s cooldown in commitCrime keeps a held trigger from adding a
+  // star per bullet. Staging never reports: the combat shot fires
+  // repeatedly and its 1 star is staged, not earned.
+  function reportGunfire(pos) {
+    if (staging) return;
+    commitCrime('gunfire', 'Shots fired', pos);
+  }
+
+  // v8d #4: shooting a foot cop — a hit is attackCop, a kill is
+  // killCop (fable's 1.0 / 1.5). The dead cop falls like a dead enemy
+  // and stops chasing, shooting and arresting.
+  function damageFootCop(cop, damage) {
+    if (cop.dead) return 'dead';
+    // v8d #7: any damage provokes this cop permanently (leonida
+    // CopBrain) — from now on he shoots on sight, even at 1 star.
+    cop.provoked = true;
+    cop.hp -= damage;
+    if (cop.hp <= 0) {
+      cop.dead = true;
+      cop.mesh.rotation.x = -Math.PI / 2;
+      cop.mesh.position.y = 0.4;
+      commitCrime('killCop', 'Officer down', { x: cop.x, z: cop.z });
+      addRep(-15);
+      return 'killed';
+    }
+    commitCrime('attackCop', 'Officer hit', { x: cop.x, z: cop.z });
+    return 'hit';
   }
 
   // Ivo's blackout: one star off, heat cooled by one band.
@@ -130,7 +250,7 @@ export function createPolice(scene, colliders, audio) {
     scene.add(mesh);
     const unit = { mesh, callsign, x, z, heading: Math.atan2(near.x - x, near.z - z), speed: 0, state: 'PURSUIT', mode: 'chase', blockTimer: 0,
       // A* routing + unstick state (v8b #13, neonbay pattern).
-      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: x, pz: z };
+      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: x, pz: z, ramCooldown: 0, bailed: false, lungeT: 0, lungeCd: 2 };
     units.push(unit);
     return unit;
   }
@@ -168,7 +288,7 @@ export function createPolice(scene, colliders, audio) {
     g.add(body, cabin, rotor, tail, stripe, cone, disc, tailRotor);
     g.userData = { rotor, cone };
     scene.add(g);
-    heli = { group: g, angle: Math.random() * Math.PI * 2, spotlightOn: true };
+    heli = { group: g, angle: Math.random() * Math.PI * 2, spotlightOn: true, fireTimer: 1.5 };
     return heli;
   }
 
@@ -192,7 +312,7 @@ export function createPolice(scene, colliders, audio) {
     mesh.rotation.y = heading;
     scene.add(mesh);
     const unit = { mesh, callsign, x: rp.x, z: rp.z, heading, speed: 0, state: opts.state || (opts.hold ? 'ROADBLOCK' : 'PURSUIT'), mode: 'chase', blockTimer: 0, hold: !!opts.hold, holdState: opts.state || null,
-      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: rp.x, pz: rp.z };
+      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: rp.x, pz: rp.z, ramCooldown: 0, bailed: false, lungeT: 0, lungeCd: 2 };
     units.push(unit);
     return unit;
   }
@@ -201,7 +321,8 @@ export function createPolice(scene, colliders, audio) {
     if (heli) { scene.remove(heli.group); heli = null; }
   }
 
-  function update(dt, playerPos, playerSpeed, playerVel = { x: 0, z: 0 }) {
+  function update(dt, playerPos, playerSpeed, playerVel = { x: 0, z: 0 }, env = {}) {
+    // env (v8d, from main.js): { inCar, heading, car, damageCar, shoveCar }.
     // Hot scenes tick even while clean (a re-raise can come from them).
     updateHotScenes(playerPos);
     // Wanted decay: hidden long enough and the heat cools off.
@@ -214,7 +335,7 @@ export function createPolice(scene, colliders, audio) {
         const inside = S.searchCenter && Math.hypot(playerPos.x - S.searchCenter.x, playerPos.z - S.searchCenter.z) < S.searchRadius;
         S.wantedTimer += inside ? dt / HIDDEN_INSIDE_MULTIPLIER : dt;
         S.searchZone = Math.max(0, S.searchZone - dt * 2);
-        if (S.wantedTimer > 14 + S.wanted * 4) {
+        if (S.wantedTimer > DECAY_SECONDS[S.wanted]) {
           S.wanted -= 1;
           // Cooling drops the heat by one band (to zero when clean).
           S.heat = S.wanted === 0 ? 0 : Math.max(bandMin(S.wanted), S.heat - 100);
@@ -250,6 +371,12 @@ export function createPolice(scene, colliders, audio) {
           u.mesh.rotation.y = u.heading;
         }
       }
+      // v8d #2: foot cops stand down too (their units are leaving).
+      for (const cop of footCops) removeFootCop(scene, cop);
+      footCops.length = 0;
+      arrest.reset();
+      bustedFlag = false;
+      arrestPrompted = false;
       removeHeli();
       return;
     }
@@ -258,11 +385,17 @@ export function createPolice(scene, colliders, audio) {
     if (S.wanted >= 3 && !heli) spawnHeli();
     if (S.wanted < 3 && heli) removeHeli();
 
-    // Line of sight: any unit within 55 and roughly facing the player sees them.
+    // Line of sight (v8d #5): a unit sees the player only with a clear
+    // line of sight inside 55 m — the old distance-only check saw
+    // through buildings, so hiding never broke the chase. Under 6 m a
+    // unit counts as seeing the player without a ray (leonida's
+    // nearAutoSee); the heli spotlight still sees everything. hasLos
+    // is last frame's (the unit loop below refreshes it), so the first
+    // frame after a spawn reads unseen — harmless.
     let seen = false;
     for (const u of units) {
       const d = Math.hypot(u.x - playerPos.x, u.z - playerPos.z);
-      if (d < 55) { seen = true; break; }
+      if (d < 6 || (d < 55 && u.hasLos)) { seen = true; break; }
     }
     if (heli && heli.spotlightOn) seen = true;
     S.inSight = seen;
@@ -297,6 +430,11 @@ export function createPolice(scene, colliders, audio) {
       let diff = wantAngle - u.heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
+      // v8d #2/#5: line of sight to the player, computed once per unit
+      // per frame — before the hold check, so staged units count
+      // toward `seen` too; the bail check and the chase branch share it.
+      const los = dist < 75 && lineOfSight(colliders, u.x, u.z, playerPos.x, playerPos.z);
+      u.hasLos = los;
       if (u.hold) {
         // Staged roadblock: holds its placed pose; still counts as seeing
         // the player, and its light bar still flashes. A held unit with
@@ -307,16 +445,41 @@ export function createPolice(scene, colliders, audio) {
         if (bar) bar.rotation.y = Math.floor(performance.now() / 120) % 2 === 0 ? 0 : Math.PI;
         continue;
       }
-      // One unit in three sets a roadblock ahead of a fast player.
-      if (S.wanted >= 2 && playerSpeed > 30 && (units.indexOf(u) % 3 === 2) && dist < 70 && dist > 25) {
+      // v8d #2/#7: bail takes precedence over the ram when the player
+      // is on foot and close — a cruiser cannot arrest anyone. Bail
+      // range is 25 m (leonida); the unit brakes hard (45 m/s²) so it
+      // stops near the player instead of overshooting past him. A unit
+      // whose officer is out stays parked until the cop comes back.
+      if (u.bailed) {
+        u.mode = 'bail'; u.state = 'ON FOOT';
+      } else if (!staging && !env.inCar && dist < 25 && los) {
+        u.mode = 'bail'; u.state = 'ON FOOT';
+      } else if (S.wanted >= 2 && playerSpeed > 30 && (units.indexOf(u) % 3 === 2) && dist < 70 && dist > 25) {
         u.mode = 'block';
         u.state = 'ROADBLOCK';
-      } else if (dist < 12) {
+      } else if (dist < 18) {
+        // v8d #6: the ram zone is 18 m (neonbay) — inside it the unit
+        // speed-matches the player and sticks ~7 m behind; the lunge
+        // below makes the contact deliberate. (Staging: the cover
+        // shot's live units are 40 m+ out, so no staged label changes.)
         u.mode = 'ram'; u.state = 'RAMMING';
       } else {
-        u.mode = 'chase'; u.state = dist < 40 ? 'PURSUIT' : 'SEARCHING';
+        // v8d #5: PURSUIT only while the player is actually seen;
+        // otherwise the unit is searching (it routes to last-seen).
+        u.mode = 'chase'; u.state = (seen && dist < 40) ? 'PURSUIT' : 'SEARCHING';
       }
-      if (u.mode === 'block') {
+      if (u.mode === 'bail') {
+        // Parked: brake to a stop, then the officer gets out (once).
+        u.speed = Math.max(0, u.speed - 45 * dt);
+        u.x += Math.sin(u.heading) * u.speed * dt;
+        u.z += Math.cos(u.heading) * u.speed * dt;
+        if (u.speed < 3 && !u.bailed) {
+          u.bailed = true;
+          const cop = createFootCop(scene, u.x + 2, u.z, u.heading);
+          cop.unit = u;
+          footCops.push(cop);
+        }
+      } else if (u.mode === 'block') {
         // Park across the road ahead of the player and wait.
         const ahead = { x: playerPos.x + Math.sin(Math.atan2(dx, dz)) * 0, z: playerPos.z };
         void ahead;
@@ -349,7 +512,6 @@ export function createPolice(scene, colliders, audio) {
         // within 13 m. Steering is Reynolds seek with a turn-slowdown:
         // the unit brakes into hard corners instead of overshooting.
         let tx, tz;
-        const los = dist < 75 && lineOfSight(colliders, u.x, u.z, playerPos.x, playerPos.z);
         if (los) {
           tx = playerPos.x + playerVel.x * 0.5;
           tz = playerPos.z + playerVel.z * 0.5;
@@ -357,12 +519,24 @@ export function createPolice(scene, colliders, audio) {
         } else {
           u.replan -= dt;
           if (!u.path || u.path.length === 0 || u.replan <= 0) {
-            u.path = astar(nearestNode(u.x, u.z), nearestNode(playerPos.x, playerPos.z)).map(nodePos);
+            // v8d #5: RESPONDING routes to the last-seen position, not
+            // the player's live position — unseen cops sweep where you
+            // WERE, they do not home in on you.
+            const goal = seen ? playerPos : (S.lastSeen || playerPos);
+            u.path = astar(nearestNode(u.x, u.z), nearestNode(goal.x, goal.z)).map(nodePos);
             u.replan = 3;
           }
           while (u.path.length > 0 && Math.hypot(u.path[0].x - u.x, u.path[0].z - u.z) < 13) u.path.shift();
           const wp = u.path[0];
           if (wp) { tx = wp.x; tz = wp.z; }
+          else if (!seen && S.searchCenter) {
+            // At the last-seen point with nothing found: sweep the
+            // search circle, each unit taking a different quadrant.
+            const qi = units.indexOf(u) % 4;
+            const qa = qi * Math.PI / 2 + 0.4;
+            tx = S.searchCenter.x + Math.sin(qa) * S.searchRadius * 0.5;
+            tz = S.searchCenter.z + Math.cos(qa) * S.searchRadius * 0.5;
+          }
           else { tx = playerPos.x; tz = playerPos.z; }
         }
         let tDiff = Math.atan2(tx - u.x, tz - u.z) - u.heading;
@@ -371,7 +545,40 @@ export function createPolice(scene, colliders, audio) {
         const top = u.mode === 'ram' ? 52 : 46;
         const vT = Math.max(10, Math.min(top, top - Math.abs(tDiff) * 30));
         u.heading += Math.max(-2.2 * dt, Math.min(2.2 * dt, tDiff));
-        u.speed += ((dist > 8 ? vT : 26) - u.speed) * Math.min(1, dt * 1.4);
+        // v8d #6 (master study §8.2): the old full-speed ram charged
+        // past the player and looped around forever — it felt like a
+        // drive-by, not a capture. Neonbay's speed-matching instead:
+        // inside 18 m the unit matches the player's speed ×0.95 and
+        // sticks ~7 m behind (the (dist−7)×1.4 term pulls it in from
+        // the edge of the zone and lets it fall back inside 7 m).
+        // At 2★+ (leonida: ramming starts at 2★) the unit surges
+        // every ~4 s — a deliberate 1.2 s lunge at full speed aimed
+        // at the 0.5 s lead point, so the physical ram (below) is a
+        // chosen hit, not an accident. Staging keeps the old numbers.
+        let approach;
+        if (!staging && u.mode === 'ram') {
+          const pSpeed = Math.hypot(playerVel.x, playerVel.z);
+          approach = Math.max(9, Math.min(52, pSpeed * 0.95 + (dist - 7) * 1.4));
+          if (u.lungeT > 0) { u.lungeT -= dt; approach = vT; }
+          else {
+            u.lungeCd -= dt;
+            if (S.wanted >= 2 && env.inCar && dist < 10 && u.lungeCd <= 0) {
+              u.lungeT = 1.2; u.lungeCd = 4;
+              approach = vT;
+            }
+          }
+        } else if (!staging && !env.inCar && dist < 7) {
+          // gta-clone slow-to-catch: a unit closing on a player on
+          // foot crawls (throttle ~0.35) instead of running them
+          // over — the bail turns the crawl into an arrest. (In ram
+          // mode the formula above already slows to the player's
+          // on-foot speed; this caps the chase branch too, e.g. when
+          // LOS is broken and the unit is A* routing.)
+          approach = Math.min(vT, 3.5);
+        } else {
+          approach = dist > 8 ? vT : 26;
+        }
+        u.speed += (approach - u.speed) * Math.min(1, dt * 1.4);
         u.x += Math.sin(u.heading) * u.speed * dt;
         u.z += Math.cos(u.heading) * u.speed * dt;
       }
@@ -395,6 +602,49 @@ export function createPolice(scene, colliders, audio) {
       const bar = u.mesh.userData.lightBar;
       if (bar) bar.rotation.y = Math.floor(performance.now() / 120) % 2 === 0 ? 0 : Math.PI;
       u.dist = dist;
+      // v8d #1: physical ram — a police unit is not traffic, so the
+      // driving.js traffic bump never saw it, and the unit sailed
+      // through the player's car forever (the "cuman keliling doang"
+      // complaint). Live play only: staged units are held, and the
+      // cover shot's live units never reach the car — the gate is belt
+      // and braces on top of that. One counted ram per 0.8 s per unit.
+      if (u.ramCooldown > 0) u.ramCooldown -= dt;
+      if (!staging && !u.hold && env.inCar && env.car && u.ramCooldown <= 0) {
+        const cx = env.car.x - u.x, cz = env.car.z - u.z;
+        const cd = Math.hypot(cx, cz);
+        if (cd < 4.2 && cd > 0.01) {
+          const nx = cx / cd, nz = cz / cd;
+          // Closing speed along the contact normal: the unit must be
+          // moving INTO the car, not scraping past it.
+          const closing = Math.sin(u.heading) * nx + Math.cos(u.heading) * nz;
+          if (closing > 0.2 && u.speed > 6) {
+            const hitSpeed = u.speed;
+            const before = Math.hypot(env.car.vx, env.car.vz);
+            // Separate the cars so the unit does not sit inside the
+            // player car and re-trigger every frame.
+            env.car.x += nx * (4.2 - cd);
+            env.car.z += nz * (4.2 - cd);
+            u.x -= nx * 1.0; u.z -= nz * 1.0;
+            // Shove along the normal + a yaw kick from the off-centre
+            // hit (the lateral offset of the car from the unit's axis).
+            const perp = cx * Math.cos(u.heading) - cz * Math.sin(u.heading);
+            const kick = Math.max(-0.25, Math.min(0.25, perp * 0.06));
+            const push = hitSpeed * 0.55 + 4;
+            if (env.shoveCar) env.shoveCar(nx * push, nz * push, kick);
+            else { env.car.vx += nx * push; env.car.vz += nz * push; env.car.heading += kick; }
+            if (env.damageCar) env.damageCar(6 + hitSpeed * 0.15);
+            if (audio && audio.crash) audio.crash();
+            u.speed *= 0.7;
+            u.ramCooldown = 0.8;
+            ramCount++;
+            const after = Math.hypot(env.car.vx, env.car.vz);
+            ramLog.push({ t: Math.round(performance.now() / 1000), unit: u.callsign,
+              unitSpeed: Math.round(hitSpeed), carBefore: Math.round(before * 3.6),
+              carAfter: Math.round(after * 3.6), kick: Math.round(kick * 100) / 100 });
+            if (ramLog.length > 8) ramLog.shift();
+          }
+        }
+      }
     }
 
     // Far-stuck sweep (see above): remove stranded units after the loop
@@ -404,6 +654,67 @@ export function createPolice(scene, colliders, audio) {
         scene.remove(units[i].mesh);
         units.splice(i, 1);
       }
+    }
+
+    // v8d #2/#7: foot cops — leonida CopBrain: catch vs shoot. Lethal
+    // only when the tier allows (3★+), the cop was ever damaged
+    // (provoked, permanent), or the player is armed (holding a gun,
+    // not fists). A non-lethal cop approaches a still player to
+    // arrest and chases a fleeing one (>2.5 m/s or in a vehicle)
+    // without firing; a lethal cop shoots. So a 1–2★ cop facing an
+    // unarmed player who stands still walks up and cuffs him — he
+    // does not open fire.
+    const playerArmed = S.weaponIndex > 0;
+    let arrestContact = false;
+    for (let i = footCops.length - 1; i >= 0; i--) {
+      const cop = footCops[i];
+      const cdx = playerPos.x - cop.x, cdz = playerPos.z - cop.z;
+      const cdist = Math.hypot(cdx, cdz);
+      cop.dist = cdist;
+      // The player drove off: the officer returns to the cruiser
+      // (despawn; the unit resumes the chase).
+      if (env.inCar && cdist > 40) {
+        if (cop.unit) cop.unit.bailed = false;
+        removeFootCop(scene, cop);
+        footCops.splice(i, 1);
+        continue;
+      }
+      const lethal = S.wanted >= 3 || cop.provoked || playerArmed;
+      // A lethal cop holds a 12–20 m standoff (leonida CopBrain)
+      // instead of running into melee range: back off inside 12 m.
+      let target = playerPos;
+      if (lethal && cdist < 12) {
+        const bx = cop.x - playerPos.x, bz = cop.z - playerPos.z;
+        const bl = Math.hypot(bx, bz) || 1;
+        target = { x: playerPos.x + bx / bl * 14, z: playerPos.z + bz / bl * 14 };
+      }
+      updateFootCop(cop, dt, target, colliders);
+      // A lethal cop fires (the same tracer + hit roll as a Dredger
+      // shot, via combat); a non-lethal cop never shoots.
+      if (lethal && combatRef && !cop.dead && cdist < 55) {
+        cop.shootTimer -= dt;
+        if (cop.shootTimer <= 0 && lineOfSight(colliders, cop.x, cop.z, playerPos.x, playerPos.z)) {
+          cop.shootTimer = 1.1 + Math.random() * 1.2;
+          combatRef.npcShot({ x: cop.x, y: 1.4, z: cop.z }, playerPos);
+        }
+      }
+      // Only a non-lethal cop in contact counts toward the arrest.
+      if (!cop.dead && !lethal && cdist < 2.5 && lineOfSight(colliders, cop.x, cop.z, playerPos.x, playerPos.z)) arrestContact = true;
+    }
+    // leonida still: under 1.5 m/s on foot, under 1 m/s in a car — a
+    // stopped car does not protect you, the cop pulls you out.
+    const pSpeed = Math.hypot(playerVel.x, playerVel.z);
+    const playerStill = env.inCar ? pSpeed < 1.0 : pSpeed < 1.5;
+    const arrestable = S.wanted >= 1 && S.wanted <= 2;
+    if (arrest.update(dt, { arrestable, contact: arrestContact, still: playerStill })) {
+      bustedFlag = true;
+    }
+    // "Freeze!" — the one warning before the cuffs (leonida's prompt).
+    if (arrest.timer > 0 && !arrestPrompted) {
+      arrestPrompted = true;
+      showToast('Freeze! Hands where I can see them');
+    } else if (arrest.timer === 0) {
+      arrestPrompted = false;
     }
 
     // Helicopter: orbit the player, spotlight tracking — unless pinned
@@ -418,6 +729,16 @@ export function createPolice(scene, colliders, audio) {
       }
       heli.group.userData.rotor.rotation.y += dt * 22;
       heli.group.userData.cone.visible = heli.spotlightOn;
+      // v8d #3: the Air-1 gunner opens fire from 3 stars (GTA V's
+      // helicopter sniper) — live play only, never a staged shot.
+      if (!staging && !heli.pinned && combatRef && S.wanted >= 3) {
+        heli.fireTimer -= dt;
+        if (heli.fireTimer <= 0) {
+          heli.fireTimer = 1.6;
+          const hp = heli.group.position;
+          combatRef.npcShot({ x: hp.x, y: hp.y - 1, z: hp.z }, playerPos, 0.25);
+        }
+      }
     }
   }
 
@@ -431,6 +752,12 @@ export function createPolice(scene, colliders, audio) {
     for (const u of units) scene.remove(u.mesh);
     units.length = 0;
     removeHeli();
+    // v8d #2: a full clean takes the foot cops and the arrest state too.
+    for (const cop of footCops) removeFootCop(scene, cop);
+    footCops.length = 0;
+    arrest.reset();
+    bustedFlag = false;
+    arrestPrompted = false;
     S.wanted = 0;
     S.inSight = false;
     S.heat = 0;
@@ -452,6 +779,32 @@ export function createPolice(scene, colliders, audio) {
   }
 
   return { units, addWanted, commitCrime, dropStar, update, clearAll, blackout, responseList,
+    // v8d #2: the live foot cops (combat's raycast reads this) + the
+    // one-shot bust flag main.js turns into the BUSTED respawn.
+    footCops, reportGunfire, damageFootCop,
+    takeBusted() { const b = bustedFlag; bustedFlag = false; return b; },
+    // v8d: staging (?shot=) runs the pre-v8d police behaviour; main.js
+    // sets this once at boot.
+    setStaging(v) { staging = !!v; },
+    // v8d #3: combat arrives after police is built (see setCombat note).
+    setCombat(c) { combatRef = c; },
+    // v8d P1 #18R: pedestrians arrive the same way — the witness check
+    // needs the live civilian list.
+    setPeds(p) { peds = p; },
+    // Read-only state for the CDP verification probe (same pattern as
+    // window.__probe in main.js).
+    probeState() {
+      return {
+        wanted: S.wanted, heat: S.heat, inSight: S.inSight, live: !staging,
+        units: units.map((u) => ({ callsign: u.callsign, state: u.state, mode: u.mode,
+          dist: Math.round(u.dist || 0), speed: Math.round(u.speed),
+          x: Math.round(u.x), z: Math.round(u.z) })),
+        ramCount, ramLog: ramLog.slice(),
+        footCops: footCops.map((c) => ({ dist: Math.round(c.dist || 0), hp: c.hp, dead: c.dead })),
+        busted: bustedFlag, arrestTimer: Math.round(arrest.timer * 100) / 100,
+        lastCrime,
+      };
+    },
     // Heat progress within the current star band (0..1) for the HUD bar.
     heatProgress() {
       if (S.wanted >= 5) return 1;

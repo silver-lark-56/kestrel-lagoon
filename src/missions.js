@@ -155,8 +155,66 @@ export function createMissions(ctx) {
     return { job, dist: Math.hypot(m.x - playerPos.x, m.z - playerPos.z) };
   }
 
+  // v8d #8: MISSION FAILED + retry (leonida Runner: fail global =
+  // wasted/busted, no checkpoints). The old bug: dying mid kill-stage
+  // cleared the enemies (main.js death flow) but left the job active
+  // with stageKills frozen — no enemies left to kill, the stage could
+  // never finish (soft-lock). Now death during a job fails it
+  // outright: the job resets to stage 0 and the player is offered a
+  // retry after the cards. `fail` is transient (not saved): wait out
+  // the WASTED/BUSTED card (3 s) → MISSION FAILED card (4 s) →
+  // prompt (E retry / Esc quit). Retry restarts from stage 0.
+  let fail = null;
+
+  function failJob(now) {
+    if (!S.jobActive) return false;
+    const job = currentJob();
+    S.jobActive = false;
+    S.stageIndex = 0;
+    S.stageKills = 0;
+    S.stageTimer = 0;
+    S.objective = null;
+    hideBeacon();
+    hideDialogue();
+    fail = { jobId: job.id, phase: 'wait', until: now + 3 };
+    return true;
+  }
+
+  function updateFail(now) {
+    if (!fail) return;
+    if (fail.phase === 'wait' && now >= fail.until) {
+      const job = jobById(fail.jobId);
+      showBanner('MISSION FAILED', `${job.title} — the job is blown.`, 4);
+      fail.phase = 'card';
+      fail.until = now + 4;
+    } else if (fail.phase === 'card' && now >= fail.until) {
+      fail.phase = 'prompt';
+      showToast(`Press E to retry "${jobById(fail.jobId).title}" — Esc to walk away`, 8);
+    }
+  }
+
+  function isPrompting() { return !!fail && fail.phase === 'prompt'; }
+
+  function retryFail() {
+    if (!isPrompting()) return;
+    const id = fail.jobId;
+    fail = null;
+    startJob(id);
+  }
+
+  function quitFail() {
+    if (!isPrompting()) return;
+    fail = null;
+    showToast('Job abandoned — the contact still has work when you are ready.');
+  }
+
+  function failState() { return fail ? { jobId: fail.jobId, phase: fail.phase } : null; }
+
+  function currentJobId() { const j = currentJob(); return j ? j.id : null; }
+
   return { startJob, update, jobById, jobMarker, nearestAvailableJob, nextOpenJob,
-    placeBeacon, hideBeacon, advanceStage,
+    placeBeacon, hideBeacon, advanceStage, failJob, updateFail, isPrompting,
+    retryFail, quitFail, failState, currentJobId,
     // Staging helper: re-enter the current stage after a shot sets stageIndex directly.
     enterStageForShot() { enterStage(); } };
 }

@@ -8,7 +8,7 @@ export const SETTINGS_KEY = 'kestrel-lagoon.settings';
 
 export function freshStats() {
   return {
-    kills: 0, shotsFired: 0, shotsHit: 0, distanceDriven: 0, distanceWalked: 0,
+    kills: 0, shotsFired: 0, shotsHit: 0, headshots: 0, distanceDriven: 0, distanceWalked: 0,
     moneyEarned: 0, timePlayed: 0, carsStolen: 0, racesWon: 0, faresDone: 0,
     stunts: 0, cachesFound: 0, deaths: 0, missionsDone: 0,
   };

@@ -14,10 +14,11 @@ export const ACT_CREW_ABILITY = 1 << 9;
 export const ACT_SPRINT = 1 << 10;
 export const ACT_CREW_SELECT = 1 << 11;
 export const ACT_GRAPHICS = 1 << 12; // v8c #20: cycle the graphics preset (G)
+export const ACT_HORN = 1 << 13; // v8d #12: car horn (H)
 
 const HELD = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
-  'ShiftLeft', 'ShiftRight', 'Space',
+  'ShiftLeft', 'ShiftRight', 'Space', 'Tab', // v8d P1 #20: Tab held = weapon wheel open
 ]);
 
 export function createInput(canvas) {
@@ -40,8 +41,9 @@ export function createInput(canvas) {
       case 'KeyX': actions |= ACT_CREW_ABILITY; break;
       case 'KeyT': actions |= ACT_CREW_SELECT; break;
       case 'KeyG': actions |= ACT_GRAPHICS; break;
-      case 'Digit0': case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
-        actions |= (1 << (16 + Number(code.slice(5)))); break; // weapon slots 0..4
+      case 'KeyH': actions |= ACT_HORN; break;
+      case 'Digit0': case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
+        actions |= (1 << (16 + Number(code.slice(5)))); break; // weapon slots 0..5
       default: break;
     }
   }
@@ -73,6 +75,9 @@ export function createInput(canvas) {
     },
     get sprint() { return keys.has('ShiftLeft') || keys.has('ShiftRight'); },
     get handbrake() { return keys.has('Space'); },
+    // v8d P1 #20: Tab held (keyboard, or the WHEEL touch button which
+    // holds 'Tab' the same way BRAKE holds Space).
+    get wheelHeld() { return keys.has('Tab'); },
     get firing() { return mouseDown; },
     get clicked() { mouseClicked = false; return mouseClicked; },
     get clickQueued() { return mouseClicked; },
@@ -91,6 +96,6 @@ export function createInput(canvas) {
 }
 
 export function weaponSlotOf(actions) {
-  for (let i = 0; i <= 4; i++) if (actions & (1 << (16 + i))) return i;
+  for (let i = 0; i <= 5; i++) if (actions & (1 << (16 + i))) return i;
   return -1;
 }

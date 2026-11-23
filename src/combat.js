@@ -16,6 +16,73 @@ export function createCombat(scene, camera, audio, police, peds) {
   let reloadUntil = 0;
   let gunfireAt = null;
   let gunfireTimer = 0;
+  let lastHeadshotToast = 0; // v8d #11: throttle the HEADSHOT toast
+
+  // v8d P1 #19 — GRENADES: thrown projectiles with a fuse + blast.
+  // A thrown grenade arcs (gravity 22, the same as the jump) and
+  // detonates after GRENADE_FUSE seconds: blast radius 9 m (leonida's
+  // heli-crash blast), damage 120 at the centre falling to 0 at the
+  // edge, flash + smoke + the explosion sound, and one 'explosion'
+  // crime (heat 100, witness-gated like any minor crime). The blast
+  // hurts enemies, peds, foot cops and the player themself — GTA
+  // grenades do not discriminate. Ped deaths from a blast are part
+  // of the explosion crime, not separate killPed crimes.
+  const GRENADE_FUSE = 1.8;
+  const GRENADE_RADIUS = 9;
+  const GRENADE_DAMAGE = 120; // centre damage (config WEAPONS grenade.damage)
+  const GRENADE_THROW_SPEED = 16;
+  const GRENADE_UP = 7;
+  const GRENADE_GRAVITY = 22;
+  const grenades = []; // { mesh, x, y, z, vx, vy, vz, fuse }
+  let explosionCount = 0;
+  let lastBlast = null; // { x, z, kills, hitPlayer } — probe-visible.
+  // Blast FX: a pooled sprite emitter (flash + smoke), following the
+  // driving.js car-explosion pattern — one shared radial-gradient
+  // texture, tinted per sprite.
+  let puffTex = null;
+  const puffs = []; // { sprite, life, maxLife, vy, grow, fade }
+  function getPuffTex() {
+    if (puffTex) return puffTex;
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 64;
+    const g = c.getContext('2d');
+    const grad = g.createRadialGradient(32, 32, 2, 32, 32, 32);
+    grad.addColorStop(0, 'rgba(255,255,255,0.9)');
+    grad.addColorStop(0.5, 'rgba(255,255,255,0.4)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 64, 64);
+    puffTex = new THREE.CanvasTexture(c);
+    return puffTex;
+  }
+  function spawnPuff(x, y, z, opts) {
+    if (puffs.length >= 24) return;
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: getPuffTex(), transparent: true, depthWrite: false,
+      color: opts.color, opacity: opts.opacity,
+      blending: opts.additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+    }));
+    sprite.position.set(x, y, z);
+    sprite.scale.set(opts.size, opts.size, 1);
+    scene.add(sprite);
+    puffs.push({ sprite, life: 0, maxLife: opts.life, vy: opts.vy, grow: opts.grow, fade: opts.opacity });
+  }
+  function updatePuffs(dt) {
+    for (let i = puffs.length - 1; i >= 0; i--) {
+      const p = puffs[i];
+      p.life += dt;
+      if (p.life >= p.maxLife) {
+        scene.remove(p.sprite);
+        p.sprite.material.dispose();
+        puffs.splice(i, 1);
+        continue;
+      }
+      const k = p.life / p.maxLife;
+      p.sprite.position.y += p.vy * dt;
+      const s = p.sprite.scale.x + p.grow * dt;
+      p.sprite.scale.set(s, s, 1);
+      p.sprite.material.opacity = p.fade * (1 - k);
+    }
+  }
 
   // Muzzle flash: a bright core + halo + an additive star-sprite at the
   // barrel, so the gunshot reads at a glance. The glow is a 4-point star
@@ -119,6 +186,10 @@ export function createCombat(scene, camera, audio, police, peds) {
   function clearEnemies() {
     for (const e of enemies) scene.remove(e.mesh);
     enemies.length = 0;
+    // v8d P1 #19: a death/bust clears live grenades too — a blast
+    // after the respawn would punish the wrong Rook.
+    for (const g of grenades) scene.remove(g.mesh);
+    grenades.length = 0;
   }
 
   function raycastTargets(origin, dir) {
@@ -131,7 +202,7 @@ export function createCombat(scene, camera, audio, police, peds) {
       const along = t.x * dir.x + t.z * dir.z;
       if (along < 0 || along > w.range) continue;
       const perp = Math.abs(t.x * dir.z - t.z * dir.x);
-      if (perp < 1.6 && along < bestD) { bestD = along; best = { kind: 'enemy', ref: e, dist: along }; }
+      if (perp < 1.6 && along < bestD) { bestD = along; best = { kind: 'enemy', ref: e, dist: along, perp }; }
     }
     for (const p of peds.peds) {
       if (p.dead) continue;
@@ -139,7 +210,16 @@ export function createCombat(scene, camera, audio, police, peds) {
       const along = t.x * dir.x + t.z * dir.z;
       if (along < 0 || along > w.range) continue;
       const perp = Math.abs(t.x * dir.z - t.z * dir.x);
-      if (perp < 1.4 && along < bestD) { bestD = along; best = { kind: 'ped', ref: p, dist: along }; }
+      if (perp < 1.4 && along < bestD) { bestD = along; best = { kind: 'ped', ref: p, dist: along, perp }; }
+    }
+    // v8d #4: foot cops are hittable too (attackCop / killCop).
+    for (const c of police.footCops || []) {
+      if (c.dead) continue;
+      const t = { x: c.x - origin.x, z: c.z - origin.z };
+      const along = t.x * dir.x + t.z * dir.z;
+      if (along < 0 || along > w.range) continue;
+      const perp = Math.abs(t.x * dir.z - t.z * dir.x);
+      if (perp < 1.4 && along < bestD) { bestD = along; best = { kind: 'cop', ref: c, dist: along, perp }; }
     }
     return best;
   }
@@ -165,6 +245,14 @@ export function createCombat(scene, camera, audio, police, peds) {
     }
     a.mag -= 1;
     S.stats.shotsFired += 1;
+    // v8d P1 #19: a grenade is thrown, not fired — no hitscan, no
+    // tracer, no gunfire report (the blast reports itself on
+    // detonation). The throw takes 0.8 s to recover from.
+    if (w.id === 'grenade') {
+      fireCooldown = 0.8;
+      throwGrenade(origin, dir);
+      return true;
+    }
     fireCooldown = w.auto ? 0.09 : 0.28;
     // Spread + tracer.
     const spread = (Math.random() - 0.5) * (w.id === 'shotgun' ? 0.14 : 0.03);
@@ -173,7 +261,21 @@ export function createCombat(scene, camera, audio, police, peds) {
     const endDist = hit ? hit.dist : w.range;
     if (hit) {
       S.stats.shotsHit += 1;
-      applyHit(hit, w.damage);
+      // v8d #11: headshot (fable 2.5×). Kestrel aims in 2D — yaw
+      // only, no pitch — so the head is the dead-centre hit: the ray
+      // passes within 0.35 m of the target's centreline, where the
+      // head sits. A wider hit strikes the body. (A full pitch-aim
+      // system would be needed for a geometric head sphere; that is
+      // out of scope for this submit.) Melee never headshots.
+      const headshot = hit.perp < 0.35;
+      if (headshot) {
+        S.stats.headshots += 1;
+        if (now - lastHeadshotToast > 1.5) {
+          lastHeadshotToast = now;
+          showToast('HEADSHOT — 2.5× damage');
+        }
+      }
+      applyHit(hit, w.damage * (headshot ? 2.5 : 1));
     }
     // Tracer line.
     const geo = new THREE.BufferGeometry().setFromPoints([
@@ -191,7 +293,10 @@ export function createCombat(scene, camera, audio, police, peds) {
     audio.gunshot();
     gunfireAt = { x: origin.x, z: origin.z };
     gunfireTimer = 1.2;
-    if (S.wanted === 0) police.commitCrime('gunfire', 'Shots fired', { x: origin.x, z: origin.z });
+    // v8d #4: every shot counts toward the heat (the old wanted===0
+    // gate meant sustained shooting never raised a star). Staging is
+    // exempt inside reportGunfire.
+    police.reportGunfire({ x: origin.x, z: origin.z });
     void fromCar;
     return true;
   }
@@ -214,7 +319,89 @@ export function createCombat(scene, camera, audio, police, peds) {
       peds.killPed(hit.ref);
       police.commitCrime('killPed', 'Civilian down', { x: hit.ref.x, z: hit.ref.z });
       addRep(-15);
+    } else if (hit.kind === 'cop') {
+      // v8d #4: the heat (attackCop / killCop) lives in police.
+      if (police.damageFootCop(hit.ref, damage) === 'killed') {
+        S.stats.kills += 1;
+        showToast('Officer down');
+      }
     }
+  }
+
+  // v8d P1 #19: throw a grenade — a small dark sphere arcing away
+  // from the player, fused 1.8 s. Throw range at full arc is ~25 m,
+  // well outside the 9 m blast, so a careful throw never hurts Rook.
+  function throwGrenade(origin, dir) {
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(0.14, 8, 6),
+      new THREE.MeshLambertMaterial({ color: 0x2a3325 }));
+    const sx = origin.x + dir.x * 1.0, sz = origin.z + dir.z * 1.0;
+    mesh.position.set(sx, origin.y, sz);
+    scene.add(mesh);
+    grenades.push({
+      mesh, x: sx, y: origin.y, z: sz,
+      vx: dir.x * GRENADE_THROW_SPEED, vy: GRENADE_UP, vz: dir.z * GRENADE_THROW_SPEED,
+      fuse: GRENADE_FUSE,
+    });
+  }
+
+  // v8d P1 #19: the blast — flash + smoke + sound, area damage with
+  // linear falloff, one 'explosion' crime (witness-gated), and peds
+  // fleeing the blast like gunfire. Kills are counted for the probe.
+  function detonate(g, playerPos) {
+    scene.remove(g.mesh);
+    g.mesh.geometry.dispose();
+    g.mesh.material.dispose();
+    spawnPuff(g.x, 1.5, g.z, { color: 0xffa030, opacity: 1, size: 3, life: 0.6, vy: 1, grow: 14, additive: true });
+    for (let i = 0; i < 6; i++) {
+      spawnPuff(g.x + (Math.random() - 0.5) * 3, 1 + Math.random(), g.z + (Math.random() - 0.5) * 3,
+        { color: 0x333333, opacity: 0.7, size: 1.5, life: 2, vy: 2.5, grow: 3 });
+    }
+    audio.explosion();
+    explosionCount++;
+    let kills = 0;
+    let hitPlayer = false;
+    const blastDmg = (d) => GRENADE_DAMAGE * (1 - d / GRENADE_RADIUS);
+    for (const e of enemies) {
+      if (e.dead) continue;
+      const d = Math.hypot(e.x - g.x, e.z - g.z);
+      if (d < GRENADE_RADIUS) {
+        const before = e.hp;
+        applyHit({ kind: 'enemy', ref: e }, blastDmg(d));
+        if (before > 0 && e.hp <= 0) kills++;
+      }
+    }
+    for (const p of peds.peds) {
+      if (p.dead) continue;
+      const d = Math.hypot(p.x - g.x, p.z - g.z);
+      // A blast kills outright inside 6 m, wounds beyond that (peds
+      // have no HP model — inside the kill radius they fall).
+      if (d < 6) { peds.killPed(p); kills++; }
+    }
+    for (const c of police.footCops || []) {
+      if (c.dead) continue;
+      const d = Math.hypot(c.x - g.x, c.z - g.z);
+      if (d < GRENADE_RADIUS && police.damageFootCop(c, blastDmg(d)) === 'killed') kills++;
+    }
+    if (playerPos) {
+      const d = Math.hypot(playerPos.x - g.x, playerPos.z - g.z);
+      if (d < GRENADE_RADIUS) {
+        hitPlayer = true;
+        const dmg = Math.round(blastDmg(d));
+        if (S.armour > 0) {
+          const absorbed = Math.min(S.armour, dmg);
+          S.armour -= absorbed;
+          S.health -= (dmg - absorbed);
+        } else S.health -= dmg;
+      }
+    }
+    // One explosion crime for the whole blast (heat 100, witness-gated
+    // — an unseen blast in the middle of nowhere may go unreported).
+    police.commitCrime('explosion', 'Explosion', { x: g.x, z: g.z });
+    // Peds + traffic flee a blast like gunfire.
+    gunfireAt = { x: g.x, z: g.z };
+    gunfireTimer = 1.2;
+    lastBlast = { x: Math.round(g.x), z: Math.round(g.z), kills, hitPlayer };
   }
 
   function update(dt, playerPos) {
@@ -239,6 +426,29 @@ export function createCombat(scene, camera, audio, police, peds) {
     }
     if (gunfireTimer > 0) gunfireTimer -= dt;
     else gunfireAt = null;
+
+    // v8d P1 #19: grenade ballistics — gravity arc, a damped bounce
+    // off the ground, detonation when the fuse runs out.
+    updatePuffs(dt);
+    for (let i = grenades.length - 1; i >= 0; i--) {
+      const g = grenades[i];
+      g.fuse -= dt;
+      g.vy -= GRENADE_GRAVITY * dt;
+      g.x += g.vx * dt;
+      g.y += g.vy * dt;
+      g.z += g.vz * dt;
+      if (g.y < 0.14) {
+        g.y = 0.14;
+        g.vy = -g.vy * 0.35;
+        g.vx *= 0.7;
+        g.vz *= 0.7;
+      }
+      g.mesh.position.set(g.x, g.y, g.z);
+      if (g.fuse <= 0) {
+        grenades.splice(i, 1);
+        detonate(g, playerPos);
+      }
+    }
 
     // Enemies advance and shoot back.
     for (const e of enemies) {
@@ -287,6 +497,29 @@ export function createCombat(scene, camera, audio, police, peds) {
 
   function aimDirection(camYaw) {
     return { x: Math.sin(camYaw), z: Math.cos(camYaw) };
+  }
+
+  // v8d #3: an NPC shot at the player (foot cops from 2 stars, the
+  // Air-1 gunner from 3) — the same tracer + hit roll + armour-first
+  // damage as a Dredger shot, from an arbitrary origin.
+  function npcShot(from, target, hitChance = 0.3) {
+    const now = performance.now() / 1000;
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(from.x, from.y, from.z),
+      new THREE.Vector3(target.x, 1.2, target.z),
+    ]);
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: 0xff6b4a, transparent: true, opacity: 0.8 }));
+    scene.add(line);
+    tracers.push({ line, until: now + 0.09 });
+    audio.gunshot();
+    if (Math.random() < hitChance) {
+      const dmg = 8 + Math.floor(Math.random() * 8);
+      if (S.armour > 0) {
+        const absorbed = Math.min(S.armour, dmg);
+        S.armour -= absorbed;
+        S.health -= (dmg - absorbed);
+      } else S.health -= dmg;
+    }
   }
 
   // v8c #21: GTA-style soft lock-on (fable player.js aimAssist pattern —
@@ -341,7 +574,22 @@ export function createCombat(scene, camera, audio, police, peds) {
 
   return {
     enemies, fire, reload, switchWeapon, spawnEnemies, clearEnemies, update,
-    currentWeapon, aimDirection, updateLockOn,
+    currentWeapon, aimDirection, updateLockOn, npcShot,
+    // v8d #11: enemy HP + headshot count for the probe.
+    // v8d #15: enemy positions too, so the soft-lock probe can walk
+    // to the nearest live enemy and prove the kill stage completable.
+    probeState() {
+      return {
+        enemies: enemies.map((e) => ({ x: Math.round(e.x), z: Math.round(e.z), hp: Math.round(e.hp), dead: e.dead })),
+        headshots: S.stats.headshots,
+        shotsHit: S.stats.shotsHit,
+        shotsFired: S.stats.shotsFired,
+        // v8d P1 #19: live grenades + blast history for the grenade probe.
+        grenadesLive: grenades.length,
+        explosions: explosionCount,
+        lastBlast,
+      };
+    },
     get gunfireAt() { return gunfireAt; },
     get reloading() { return performance.now() / 1000 < reloadUntil; },
     // The live lock target for the HUD crosshair (null when not locked).
