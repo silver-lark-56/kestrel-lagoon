@@ -572,7 +572,7 @@ export function buildCity(scene, seed) {
   dynamic.beaconRing = ring;
 
   scene.add(group);
-  return { group, colliders, dynamic, palmSpots };
+  return { group, colliders, dynamic, palmSpots, lampSpots };
 }
 
 // Push a circle (x, z, radius) out of every building AABB it overlaps.

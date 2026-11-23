@@ -289,11 +289,67 @@ export function createCombat(scene, camera, audio, police, peds) {
     return { x: Math.sin(camYaw), z: Math.cos(camYaw) };
   }
 
+  // v8c #21: GTA-style soft lock-on (fable player.js aimAssist pattern —
+  // NO LICENSE, pattern only, Kestrel's own code). While aiming on foot,
+  // the aim snaps to the closest target inside a 20° cone (cos 0.94)
+  // and tracks it gently while it stays inside a 10° cone (cos 0.985).
+  // Enemies score a small bonus over bystanders so the crosshair picks
+  // the threat first. The camera steering itself lives in player.js
+  // (steerToTarget); this module only picks and holds the target.
+  let locked = null; // { kind: 'enemy'|'ped', ref }
+  function lockPos(entry) {
+    if (!entry) return null;
+    const r = entry.ref;
+    return { x: r.x, z: r.z, dead: !!r.dead };
+  }
+  function updateLockOn(origin, camYaw, aiming) {
+    if (!aiming) { locked = null; return null; }
+    const fwd = { x: Math.sin(camYaw), z: Math.cos(camYaw) };
+    // Hold the current lock while the target is alive, in range and
+    // inside the tighter tracking cone.
+    if (locked) {
+      const t = lockPos(locked);
+      const dx = t.x - origin.x, dz = t.z - origin.z;
+      const d = Math.hypot(dx, dz);
+      const cos = d > 0.01 ? (dx * fwd.x + dz * fwd.z) / d : 0;
+      if (t.dead || d < 1.5 || d > 45 || cos < 0.985) locked = null;
+    }
+    if (!locked) {
+      // Snap: the best-scoring target inside the 20° acceptance cone.
+      // Score prefers centred targets, then near ones (fable's formula).
+      let best = null, bestScore = 0.94;
+      const consider = (kind, ref, bonus) => {
+        const dx = ref.x - origin.x, dz = ref.z - origin.z;
+        const d = Math.hypot(dx, dz);
+        if (d < 1.5 || d > 45) return;
+        const cos = (dx * fwd.x + dz * fwd.z) / d;
+        const score = cos - d * 0.0008 + bonus;
+        if (score > bestScore) { bestScore = score; best = { kind, ref }; }
+      };
+      for (const e of enemies) if (!e.dead) consider('enemy', e, 0.02);
+      for (const pd of peds.peds) if (!pd.dead) consider('ped', pd, 0);
+      if (best) {
+        locked = best;
+        const t = lockPos(best);
+        return { x: t.x, z: t.z, snapped: true };
+      }
+      return null;
+    }
+    const t = lockPos(locked);
+    return { x: t.x, z: t.z, snapped: false };
+  }
+
   return {
     enemies, fire, reload, switchWeapon, spawnEnemies, clearEnemies, update,
-    currentWeapon, aimDirection,
+    currentWeapon, aimDirection, updateLockOn,
     get gunfireAt() { return gunfireAt; },
     get reloading() { return performance.now() / 1000 < reloadUntil; },
+    // The live lock target for the HUD crosshair (null when not locked).
+    get lockTarget() {
+      if (!locked) return null;
+      const t = lockPos(locked);
+      return t.dead ? null : { x: t.x, z: t.z, kind: locked.kind };
+    },
     forceMuzzle(origin) {
       muzzle.position.set(origin.x, origin.y + 0.45, origin.z);
       muzzle.visible = true;

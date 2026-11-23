@@ -212,12 +212,25 @@ export function createRender(canvas) {
     camera.updateProjectionMatrix();
   }
 
+  // v8c #18: optional post-pass (bloom), run after the normal render.
+  // Unset by default: the render path is exactly the pre-v8c one.
+  let postRenderer = null;
+  function setPostRenderer(fn) { postRenderer = fn; }
+
   function render() {
     // Billboard the sun meshes at the final camera before drawing.
     sunCore.lookAt(camera.position);
     sunHalo.lookAt(camera.position);
     renderer.render(scene, camera);
+    if (postRenderer) postRenderer();
   }
 
-  return { renderer, scene, camera, applyTimeOfDay, resize, render, bindLamps, bindFacades, sun, hemi };
+  // v8c #20: the graphics preset / adaptive scaler drives the pixel
+  // ratio through here (three re-applies the drawing-buffer size
+  // internally, so no resize call is needed).
+  function setPixelRatio(d) {
+    renderer.setPixelRatio(Math.max(0.5, Math.min(2, d)));
+  }
+
+  return { renderer, scene, camera, applyTimeOfDay, resize, render, bindLamps, bindFacades, sun, hemi, setPixelRatio, setPostRenderer };
 }

@@ -13,6 +13,7 @@ export const ACT_CREW_CYCLE = 1 << 8;
 export const ACT_CREW_ABILITY = 1 << 9;
 export const ACT_SPRINT = 1 << 10;
 export const ACT_CREW_SELECT = 1 << 11;
+export const ACT_GRAPHICS = 1 << 12; // v8c #20: cycle the graphics preset (G)
 
 const HELD = new Set([
   'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight',
@@ -38,6 +39,7 @@ export function createInput(canvas) {
       case 'KeyC': actions |= ACT_CREW_CYCLE; break;
       case 'KeyX': actions |= ACT_CREW_ABILITY; break;
       case 'KeyT': actions |= ACT_CREW_SELECT; break;
+      case 'KeyG': actions |= ACT_GRAPHICS; break;
       case 'Digit0': case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4':
         actions |= (1 << (16 + Number(code.slice(5)))); break; // weapon slots 0..4
       default: break;

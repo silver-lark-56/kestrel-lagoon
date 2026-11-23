@@ -51,7 +51,7 @@ export function createWeather(scene, audio) {
   let flash = 0;
   let nextFlash = 7 + Math.random() * 15;
 
-  function update(dt, camera) {
+  function update(dt, camera, indoors = false) {
     // State machine: clear 40-90 s, rain 50-100 s, intensity fades in/out.
     timer -= dt;
     if (timer <= 0) {
@@ -67,7 +67,10 @@ export function createWeather(scene, audio) {
     const target = state === 'rain' ? 1 : 0;
     intensity += Math.max(-0.3 * dt, Math.min(0.3 * dt, target - intensity));
 
-    if (intensity > 0.01) {
+    // v8c #14: no rain volume, fog pull-in or new lightning while the
+    // player is inside a shop — the state machine above keeps running,
+    // so the weather outside is waiting when they step back out.
+    if (intensity > 0.01 && !indoors) {
       rain.visible = true;
       mat.opacity = 0.38 * intensity;
       // The volume follows the camera; drops fall and recycle at the floor.
@@ -99,7 +102,7 @@ export function createWeather(scene, audio) {
 
     // Lightning: a strike every 7-22 s while raining, flash decays fast,
     // thunder rolls in 0.5-2.5 s later (distance by delay).
-    if (state === 'rain' && intensity > 0.5) {
+    if (state === 'rain' && intensity > 0.5 && !indoors) {
       nextFlash -= dt;
       if (nextFlash <= 0) {
         nextFlash = 7 + Math.random() * 15;
@@ -111,11 +114,19 @@ export function createWeather(scene, audio) {
     flash = Math.max(0, flash - 3 * dt);
     flashLight.intensity = flash * 2.5;
 
-    if (audio && audio.setRain) audio.setRain(intensity);
+    if (audio && audio.setRain) audio.setRain(indoors ? 0 : intensity);
   }
 
   return {
     update,
     state() { return { raining: state === 'rain', intensity, flash }; },
+    // v8c #20: the graphics preset thins the rain without reallocating
+    // anything — the draw range just hides the tail of the drop list.
+    // (The per-frame position loop still runs over all drops; 1,500
+    // drops of arithmetic is cheaper than rebuilding the buffer.)
+    setDensity(f) {
+      const n = Math.max(0, Math.min(1, f));
+      geo.setDrawRange(0, Math.floor(DROPS * n) * 2);
+    },
   };
 }

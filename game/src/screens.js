@@ -16,6 +16,7 @@ export function createScreens(ctx) {
   let onStartGame = null; // set by main.js: (fresh) => void
   let onResume = null;
   let onQuitToTitle = null;
+  let graphics = null; // set by main.js: the graphics preset module (v8c #20)
 
   function show(id) {
     for (const s of ['title-screen', 'pause-screen', 'map-screen', 'controls-screen', 'settings-screen', 'stats-screen', 'showroom-screen']) {
@@ -293,10 +294,28 @@ export function createScreens(ctx) {
 
   // --- Wiring ---------------------------------------------------------------------
   let lastMenu = 'title-screen';
+
+  // Re-read every settings control from S: keys (G cycles the preset, V
+  // the camera) can change the state while the menu is closed, so the
+  // menu must not show a stale value when it opens.
+  function syncSettings() {
+    const vol = $('setting-volume');
+    if (vol) vol.value = Math.round(S.volume * 100);
+    const sens = $('setting-sensitivity');
+    if (sens) sens.value = Math.round(S.sensitivity * 100);
+    const cam = $('setting-camera');
+    if (cam) cam.value = String(S.cameraMode);
+    const radio = $('setting-radio');
+    if (radio) radio.value = String(S.radioIndex);
+    const gfx = $('setting-graphics');
+    if (gfx) gfx.value = S.graphics;
+  }
+
   function openSub(id, from) {
     lastMenu = from;
     if (id === 'stats-screen') renderStats();
     if (id === 'showroom-screen') renderShowroom();
+    if (id === 'settings-screen') syncSettings();
     show(id);
   }
 
@@ -333,17 +352,25 @@ export function createScreens(ctx) {
     if (btnMapClose) btnMapClose.addEventListener('click', () => { hideAll(); if (onResume) onResume(); });
     // Settings controls.
     const vol = $('setting-volume');
-    if (vol) { vol.value = Math.round(S.volume * 100); vol.addEventListener('input', () => { S.volume = vol.value / 100; audio.setVolume(S.volume); }); }
+    if (vol) { vol.addEventListener('input', () => { S.volume = vol.value / 100; audio.setVolume(S.volume); }); }
     const sens = $('setting-sensitivity');
-    if (sens) { sens.value = Math.round(S.sensitivity * 100); sens.addEventListener('input', () => { S.sensitivity = sens.value / 100; }); }
+    if (sens) { sens.addEventListener('input', () => { S.sensitivity = sens.value / 100; }); }
     const cam = $('setting-camera');
-    if (cam) { cam.value = String(S.cameraMode); cam.addEventListener('change', () => { S.cameraMode = parseInt(cam.value, 10); }); }
+    if (cam) { cam.addEventListener('change', () => { S.cameraMode = parseInt(cam.value, 10); }); }
     const radio = $('setting-radio');
     if (radio) {
       radio.innerHTML = RADIO.map((r, i) => `<option value="${i}">${r.freq} — ${r.genre}</option>`).join('');
-      radio.value = String(S.radioIndex);
       radio.addEventListener('change', () => { S.radioIndex = parseInt(radio.value, 10); audio.radioSwitch(); });
     }
+    // v8c #20: graphics preset — Low / Medium / High / Ultra.
+    const gfx = $('setting-graphics');
+    if (gfx) {
+      gfx.addEventListener('change', () => {
+        S.graphics = gfx.value;
+        if (graphics) graphics.setPreset(gfx.value);
+      });
+    }
+    syncSettings();
   }
 
   return {
@@ -351,5 +378,6 @@ export function createScreens(ctx) {
     set onStartGame(fn) { onStartGame = fn; },
     set onResume(fn) { onResume = fn; },
     set onQuitToTitle(fn) { onQuitToTitle = fn; },
+    setGraphics(g) { graphics = g; },
   };
 }

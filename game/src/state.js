@@ -43,7 +43,9 @@ export function freshState() {
     stageTimer: 0, objectiveDist: 0,
     radioIndex: 1, radioTrack: 0, radioTime: 0, radioOn: true,
     muted: false, volume: 0.7, sensitivity: 1, cameraMode: 0,
+    graphics: 'high', // v8c #20: graphics preset (low/medium/high/ultra)
     inCar: false, speedKmh: 0, vehicleName: '', vehicleHealth: 100, gear: 1,
+    interior: null, // v8c #14: shop id while inside a walk-in interior
     districtHeat: {}, // district id -> extra heat 0..5, decays over time
     cachesFound: [],
     propertiesOwned: [],
@@ -230,6 +232,7 @@ export function loadSettings() {
     if (typeof d.sensitivity === 'number') S.sensitivity = d.sensitivity;
     if (typeof d.muted === 'boolean') S.muted = d.muted;
     if (typeof d.cameraMode === 'number') S.cameraMode = d.cameraMode;
+    if (typeof d.graphics === 'string') S.graphics = d.graphics;
   } catch { /* defaults stand */ }
 }
 
@@ -237,6 +240,7 @@ export function saveSettings() {
   try {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       volume: S.volume, sensitivity: S.sensitivity, muted: S.muted, cameraMode: S.cameraMode,
+      graphics: S.graphics,
     }));
   } catch { /* storage can be off */ }
 }

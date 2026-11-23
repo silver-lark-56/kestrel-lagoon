@@ -290,6 +290,10 @@ export function createHud(ctx) {
     if (vig) vig.style.opacity = S.health < 30 ? String(0.35 + (30 - S.health) / 30 * 0.4) : '0';
     // Crosshair.
     setVisible('crosshair', !S.inCar && S.screen === 'game');
+    // v8c #21: the crosshair turns red while the soft lock-on holds a
+    // target, so the player can see the lock without looking away.
+    const ch = $('crosshair');
+    if (ch) ch.classList.toggle('locked', !!combat.lockTarget);
     drawMinimap(playerPos, playerHeading);
   }
 

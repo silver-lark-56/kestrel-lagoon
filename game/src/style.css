@@ -17,6 +17,7 @@ img { display: block; }
   background: radial-gradient(ellipse at center, transparent 55%, rgba(255,30,30,0.55) 100%); }
 #crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
   font-size: 26px; font-weight: 300; color: rgba(255,255,255,0.9); text-shadow: 0 0 6px #000; }
+#crosshair.locked { color: #ff3b30; }
 
 #mission-card { position: absolute; top: 16px; left: 16px; width: 310px; border-left: 4px solid #ff5d8f; }
 .mc-top { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
