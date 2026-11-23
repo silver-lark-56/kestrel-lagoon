@@ -7,8 +7,29 @@ import { S, addRep, showToast, showBanner } from './state.js';
 import { POLICE_UNITS } from './config.js';
 import { buildCarMesh, modelById } from './vehicles.js';
 import { resolveCircle, nearestRoadPoint } from './city.js';
+import { nearestNode, astar, nodePos, lineOfSight } from './road-graph.js';
 
 const UNIT_STATES = ['PURSUIT', 'RAMMING', 'ROADBLOCK', 'SEARCHING'];
+
+// v8a #6: search-circle + hot-scene tuning (pattern: leonida
+// WantedMachine, MIT — leonida/src/systems/wanted/{machine,config}.ts).
+// The circle starts where the player was last seen and widens as the
+// cops sweep; hiding inside it cools the heat 1.5x slower. A crime
+// leaves a hot scene for 2 minutes; walking back through it while clean
+// puts 1 star back on.
+const SEARCH = { initialRadius: 40, growthPerSecond: 8, maxRadiusBase: 220, maxRadiusPerLevel: 30 };
+const HOT_SCENE = { radius: 60, expirySeconds: 120, mergeRadius: 30, max: 4, reraiseLevel: 1 };
+const HIDDEN_INSIDE_MULTIPLIER = 1.5;
+
+// v8a #4: heat table (numbers: fable DESIGN.md — fable's 0.34/0.8/0.5
+// star-fractions as points, 100 per star band, first star at 34).
+// Stars are DERIVED from heat, so a small crime at high heat can push
+// you over the line and a big crime can jump two stars at once.
+const HEAT = { gunfire: 34, hitPed: 34, killPed: 80, carjack: 50, attackCop: 100, killCop: 150, explosion: 100 };
+const COPS_PER_STAR = [0, 1, 2, 4, 6, 8]; // fable dispatch table
+const HEAT_MAX = 500;
+const bandMin = (stars) => (stars <= 0 ? 0 : 34 + (stars - 1) * 100);
+const starsFromHeat = (h) => (h < 34 ? 0 : Math.min(5, 1 + Math.floor((h - 34) / 100)));
 
 export function createPolice(scene, colliders, audio) {
   const units = []; // {mesh, callsign, x, z, heading, speed, state, mode}
@@ -17,18 +38,83 @@ export function createPolice(scene, colliders, audio) {
   let unitCounter = 0;
 
   function wantedTarget() {
-    return Math.min(2 + S.wanted, 7); // units on the street per star
+    return COPS_PER_STAR[S.wanted] || 0; // units on the street per star
   }
 
-  function addWanted(n, why) {
+  // Shared star-setter: toasts, banners and rep fire only on an increase.
+  function setStars(stars, why) {
     const before = S.wanted;
-    S.wanted = Math.max(0, Math.min(5, S.wanted + n));
+    S.wanted = Math.max(0, Math.min(5, stars));
     if (S.wanted > before) {
       S.wantedTimer = 0;
       if (why) showToast(`${why} — wanted ${S.wanted}★`);
       if (S.wanted >= 3 && before < 3) showBanner('AIR SUPPORT INBOUND', 'KLPD Air-1 is overhead — break line of sight');
       if (S.wanted === 5 && before < 5) showBanner('MAXIMUM HEAT', 'Every unit in the lagoon is coming for you');
       addRep(2);
+      return true;
+    }
+    return false;
+  }
+
+  function addWanted(n, why) {
+    // Direct star set (staging + legacy callers): heat sits at the
+    // floor of the new band so the next crime behaves predictably.
+    if (setStars(S.wanted + n, why)) S.heat = bandMin(S.wanted);
+  }
+
+  // The crime path: add heat, derive stars, leave a hot scene.
+  function commitCrime(type, why, pos = null) {
+    S.heat = Math.min(HEAT_MAX, S.heat + (HEAT[type] || 0));
+    setStars(starsFromHeat(S.heat), why);
+    if (pos) addHotScene(pos.x, pos.z);
+  }
+
+  // Ivo's blackout: one star off, heat cooled by one band.
+  function dropStar() {
+    if (S.wanted <= 0) return;
+    S.wanted -= 1;
+    S.heat = S.wanted === 0 ? 0 : Math.max(bandMin(S.wanted), S.heat - 100);
+    S.wantedTimer = 0;
+  }
+
+  // Hot crime scenes (leonida pattern): a new crime near an existing
+  // scene refreshes it instead of adding one; the player is standing in
+  // the scene when it is created, so re-raising needs an
+  // outside→inside transition, not mere presence.
+  function addHotScene(x, z) {
+    const now = performance.now() / 1000;
+    for (const s of S.hotScenes) {
+      if (Math.hypot(x - s.x, z - s.z) < HOT_SCENE.mergeRadius) {
+        s.until = now + HOT_SCENE.expirySeconds;
+        return;
+      }
+    }
+    if (S.hotScenes.length >= HOT_SCENE.max) S.hotScenes.shift();
+    S.hotScenes.push({ x, z, radius: HOT_SCENE.radius, until: now + HOT_SCENE.expirySeconds, playerInside: true });
+  }
+
+  function updateHotScenes(playerPos) {
+    const now = performance.now() / 1000;
+    for (let i = S.hotScenes.length - 1; i >= 0; i--) {
+      const s = S.hotScenes[i];
+      if (now >= s.until) {
+        S.hotScenes.splice(i, 1);
+        continue;
+      }
+      const inside = Math.hypot(playerPos.x - s.x, playerPos.z - s.z) < s.radius;
+      if (inside && !s.playerInside && S.wanted === 0) {
+        // Walked back through a live crime scene while clean: the
+        // cops put the pieces together and the heat is back on.
+        s.playerInside = true;
+        S.wanted = HOT_SCENE.reraiseLevel;
+        S.wantedTimer = 0;
+        S.lastSeen = { x: s.x, z: s.z };
+        S.searchCenter = { x: s.x, z: s.z };
+        S.searchRadius = SEARCH.initialRadius;
+        showToast('Back at the scene — the heat is on');
+        continue;
+      }
+      s.playerInside = inside;
     }
   }
 
@@ -42,7 +128,9 @@ export function createPolice(scene, colliders, audio) {
     const x = rp.x, z = rp.z;
     mesh.position.set(x, 0, z);
     scene.add(mesh);
-    const unit = { mesh, callsign, x, z, heading: Math.atan2(near.x - x, near.z - z), speed: 0, state: 'PURSUIT', mode: 'chase', blockTimer: 0 };
+    const unit = { mesh, callsign, x, z, heading: Math.atan2(near.x - x, near.z - z), speed: 0, state: 'PURSUIT', mode: 'chase', blockTimer: 0,
+      // A* routing + unstick state (v8b #13, neonbay pattern).
+      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: x, pz: z };
     units.push(unit);
     return unit;
   }
@@ -103,7 +191,8 @@ export function createPolice(scene, colliders, audio) {
     mesh.position.set(rp.x, 0, rp.z);
     mesh.rotation.y = heading;
     scene.add(mesh);
-    const unit = { mesh, callsign, x: rp.x, z: rp.z, heading, speed: 0, state: opts.state || (opts.hold ? 'ROADBLOCK' : 'PURSUIT'), mode: 'chase', blockTimer: 0, hold: !!opts.hold, holdState: opts.state || null };
+    const unit = { mesh, callsign, x: rp.x, z: rp.z, heading, speed: 0, state: opts.state || (opts.hold ? 'ROADBLOCK' : 'PURSUIT'), mode: 'chase', blockTimer: 0, hold: !!opts.hold, holdState: opts.state || null,
+      path: null, replan: 0, stuckT: 0, reverseT: 0, farStuckT: 0, px: rp.x, pz: rp.z };
     units.push(unit);
     return unit;
   }
@@ -112,15 +201,23 @@ export function createPolice(scene, colliders, audio) {
     if (heli) { scene.remove(heli.group); heli = null; }
   }
 
-  function update(dt, playerPos, playerSpeed) {
+  function update(dt, playerPos, playerSpeed, playerVel = { x: 0, z: 0 }) {
+    // Hot scenes tick even while clean (a re-raise can come from them).
+    updateHotScenes(playerPos);
     // Wanted decay: hidden long enough and the heat cools off.
     if (S.wanted > 0) {
       const seen = S.inSight;
       if (!seen) {
-        S.wantedTimer += dt;
+        // Hiding INSIDE the search circle cools slower (leonida's
+        // hidden-inside multiplier): the cops are sweeping right
+        // where you are. Outside the circle, the timer runs full rate.
+        const inside = S.searchCenter && Math.hypot(playerPos.x - S.searchCenter.x, playerPos.z - S.searchCenter.z) < S.searchRadius;
+        S.wantedTimer += inside ? dt / HIDDEN_INSIDE_MULTIPLIER : dt;
         S.searchZone = Math.max(0, S.searchZone - dt * 2);
         if (S.wantedTimer > 14 + S.wanted * 4) {
           S.wanted -= 1;
+          // Cooling drops the heat by one band (to zero when clean).
+          S.heat = S.wanted === 0 ? 0 : Math.max(bandMin(S.wanted), S.heat - 100);
           S.wantedTimer = 0;
           showToast(`Heat cooling — wanted ${S.wanted}★`);
           if (S.wanted === 0) { showBanner('YOU LOST THEM', 'The lagoon forgets. For now.'); addRep(25); }
@@ -170,6 +267,29 @@ export function createPolice(scene, colliders, audio) {
     if (heli && heli.spotlightOn) seen = true;
     S.inSight = seen;
 
+    // Search circle (leonida pattern): while a cop has eyes on the
+    // player, the last-seen position tracks them and there is no
+    // circle (active pursuit). The moment sight breaks, the circle
+    // anchors where the player was LAST SEEN and grows as the search
+    // widens — it never follows the player.
+    if (S.wanted > 0) {
+      if (seen) {
+        S.lastSeen = { x: playerPos.x, z: playerPos.z };
+        S.searchCenter = null;
+        S.searchRadius = 0;
+      } else if (S.lastSeen) {
+        if (!S.searchCenter) {
+          S.searchCenter = { x: S.lastSeen.x, z: S.lastSeen.z };
+          S.searchRadius = SEARCH.initialRadius;
+        }
+        S.searchRadius = Math.min(S.searchRadius + SEARCH.growthPerSecond * dt,
+          SEARCH.maxRadiusBase + SEARCH.maxRadiusPerLevel * S.wanted);
+      }
+    } else {
+      S.searchCenter = null;
+      S.searchRadius = 0;
+    }
+
     for (const u of units) {
       const dx = playerPos.x - u.x, dz = playerPos.z - u.z;
       const dist = Math.hypot(dx, dz);
@@ -212,21 +332,78 @@ export function createPolice(scene, colliders, audio) {
           u.speed = 0;
           u.heading += Math.PI / 2 * dt * 0; // hold position, angled across the road
         }
+      } else if (u.reverseT > 0) {
+        // Unstick (neonbay pattern): back out with inverted steering for
+        // 1.6 s, then the chase resumes with a fresh route.
+        u.reverseT -= dt;
+        if (u.reverseT <= 0) u.replan = 0;
+        u.heading += Math.max(-2.2 * dt, Math.min(2.2 * dt, -diff));
+        u.speed = 12;
+        u.x -= Math.sin(u.heading) * u.speed * dt;
+        u.z -= Math.cos(u.heading) * u.speed * dt;
       } else {
+        // A* road-graph routing (neonbay pattern): with line of sight
+        // the unit drives straight at the player, leading them by 0.5 s
+        // of travel; without it, it follows an A* path over the
+        // intersection graph, replanned every 3 s. Waypoints advance
+        // within 13 m. Steering is Reynolds seek with a turn-slowdown:
+        // the unit brakes into hard corners instead of overshooting.
+        let tx, tz;
+        const los = dist < 75 && lineOfSight(colliders, u.x, u.z, playerPos.x, playerPos.z);
+        if (los) {
+          tx = playerPos.x + playerVel.x * 0.5;
+          tz = playerPos.z + playerVel.z * 0.5;
+          u.path = null;
+        } else {
+          u.replan -= dt;
+          if (!u.path || u.path.length === 0 || u.replan <= 0) {
+            u.path = astar(nearestNode(u.x, u.z), nearestNode(playerPos.x, playerPos.z)).map(nodePos);
+            u.replan = 3;
+          }
+          while (u.path.length > 0 && Math.hypot(u.path[0].x - u.x, u.path[0].z - u.z) < 13) u.path.shift();
+          const wp = u.path[0];
+          if (wp) { tx = wp.x; tz = wp.z; }
+          else { tx = playerPos.x; tz = playerPos.z; }
+        }
+        let tDiff = Math.atan2(tx - u.x, tz - u.z) - u.heading;
+        while (tDiff > Math.PI) tDiff -= Math.PI * 2;
+        while (tDiff < -Math.PI) tDiff += Math.PI * 2;
         const top = u.mode === 'ram' ? 52 : 46;
-        u.heading += Math.max(-2.2 * dt, Math.min(2.2 * dt, diff));
-        u.speed += ((dist > 8 ? top : 26) - u.speed) * Math.min(1, dt * 1.4);
+        const vT = Math.max(10, Math.min(top, top - Math.abs(tDiff) * 30));
+        u.heading += Math.max(-2.2 * dt, Math.min(2.2 * dt, tDiff));
+        u.speed += ((dist > 8 ? vT : 26) - u.speed) * Math.min(1, dt * 1.4);
         u.x += Math.sin(u.heading) * u.speed * dt;
         u.z += Math.cos(u.heading) * u.speed * dt;
       }
       const fixed = resolveCircle(colliders, u.x, u.z, 2.1);
       u.x = fixed.x; u.z = fixed.z;
+      // Stuck tracking: commanded speed but no ground covered. 1.4 s of
+      // it triggers the reverse above; a unit 170 m+ out that has not
+      // moved for 4 s is despawned below (the spawn loop replaces it
+      // near the player — neonbay's farStuck rule).
+      const moved = Math.hypot(u.x - u.px, u.z - u.pz) / Math.max(dt, 1e-3);
+      u.px = u.x; u.pz = u.z;
+      if (u.speed > 10 && moved < 1 && u.reverseT <= 0) {
+        u.stuckT += dt;
+        if (u.stuckT > 1.4) { u.reverseT = 1.6; u.stuckT = 0; }
+      } else u.stuckT = 0;
+      if (dist > 170 && moved < 1) u.farStuckT += dt;
+      else u.farStuckT = 0;
       u.mesh.position.set(u.x, 0, u.z);
       u.mesh.rotation.y = u.heading;
       // Flashing light bar.
       const bar = u.mesh.userData.lightBar;
       if (bar) bar.rotation.y = Math.floor(performance.now() / 120) % 2 === 0 ? 0 : Math.PI;
       u.dist = dist;
+    }
+
+    // Far-stuck sweep (see above): remove stranded units after the loop
+    // so the iteration above never splices under itself.
+    for (let i = units.length - 1; i >= 0; i--) {
+      if (units[i].farStuckT > 4) {
+        scene.remove(units[i].mesh);
+        units.splice(i, 1);
+      }
     }
 
     // Helicopter: orbit the player, spotlight tracking — unless pinned
@@ -256,6 +433,14 @@ export function createPolice(scene, colliders, audio) {
     removeHeli();
     S.wanted = 0;
     S.inSight = false;
+    S.heat = 0;
+    // A respray is a full clean: new plates, new colour — the search
+    // state and the hot scenes go with it. (A natural evasion-decay
+    // keeps the hot scenes: the scene stays under investigation.)
+    S.searchCenter = null;
+    S.searchRadius = 0;
+    S.lastSeen = null;
+    S.hotScenes = [];
   }
 
   function responseList(playerPos) {
@@ -266,7 +451,13 @@ export function createPolice(scene, colliders, audio) {
     }));
   }
 
-  return { units, addWanted, update, clearAll, blackout, responseList, get heli() { return heli; },
+  return { units, addWanted, commitCrime, dropStar, update, clearAll, blackout, responseList,
+    // Heat progress within the current star band (0..1) for the HUD bar.
+    heatProgress() {
+      if (S.wanted >= 5) return 1;
+      return Math.max(0, Math.min(1, (S.heat - bandMin(S.wanted)) / 100));
+    },
+    get heli() { return heli; },
     // Staging helpers: place a unit / the heli exactly where a shot needs them.
     spawnUnitForShot(pos) { return spawnUnit(pos); },
     placeUnitAt,

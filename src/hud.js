@@ -2,7 +2,7 @@
 // clock, weapons, speed, health, REP, radio, dialogue, police list, crew
 // panel) plus the round minimap canvas with blips, GPS route and the
 // north indicator. Everything the judge sees in a screenshot lives here.
-import { S, currentJob, currentStage, repTitle, clockText, radioStation, radioTrack } from './state.js';
+import { S, currentJob, currentStage, repTitle, clockText, radioStation, radioTrack, showAreaBanner } from './state.js';
 import { WEAPONS, DISTRICTS, WORLD, CREW, SHOPS, CACHES, CREW_UNLOCK, districtAt, personById } from './config.js';
 import { portraitURL } from './textures.js';
 
@@ -18,6 +18,7 @@ function portrait(person) {
 
 export function createHud(ctx) {
   const { police, combat, crew } = ctx;
+  let lastDistrictId = null; // v8a #5: fire the area banner on entry
   const mapCanvas = $('minimap');
   const mctx = mapCanvas ? mapCanvas.getContext('2d') : null;
   const MAP_R = 110; // minimap world radius shown
@@ -111,13 +112,26 @@ export function createHud(ctx) {
     }
     // Objective.
     if (S.objective) blip(S.objective.x, S.objective.z, '#ffd166', 7, 'diamond');
-    // Search zone ring: visible whenever wanted — the zone follows you
-    // while in sight, and shrinks as you stay hidden.
-    if (S.wanted > 0) {
-      mctx.strokeStyle = S.inSight ? 'rgba(255,80,80,0.65)' : 'rgba(255,80,80,0.4)';
+    // Hot crime scenes (v8a #6): orange dot + ring — re-entering one
+    // while clean puts the heat back on.
+    for (const hs of S.hotScenes) {
+      const p = toMap(hs.x, hs.z);
+      if (p.x < 0 || p.x > W || p.y < 0 || p.y > H) continue;
+      mctx.fillStyle = '#ff8a3c';
+      mctx.beginPath(); mctx.arc(p.x, p.y, 4, 0, Math.PI * 2); mctx.fill();
+      mctx.strokeStyle = 'rgba(255,138,60,0.8)';
+      mctx.lineWidth = 1.5;
+      mctx.beginPath(); mctx.arc(p.x, p.y, 8, 0, Math.PI * 2); mctx.stroke();
+    }
+    // Search circle (v8a #6, leonida pattern): only while the cops have
+    // LOST sight — centred where the player was LAST SEEN, growing as
+    // the search widens. No ring while in sight: they know where you are.
+    if (S.wanted > 0 && !S.inSight && S.searchCenter) {
+      const c = toMap(S.searchCenter.x, S.searchCenter.z);
+      mctx.strokeStyle = 'rgba(255,80,80,0.5)';
       mctx.lineWidth = 2;
       mctx.beginPath();
-      mctx.arc(cx, cy, 26 + S.searchZone * 0.4, 0, Math.PI * 2);
+      mctx.arc(c.x, c.y, Math.max(8, S.searchRadius * scale), 0, Math.PI * 2);
       mctx.stroke();
     }
     // Player arrow.
@@ -175,7 +189,13 @@ export function createHud(ctx) {
     }
     setText('cash', `$${S.cash.toLocaleString()}`);
     setText('clock', `${clockText()} · DAY ${S.day}`);
-    setText('district', districtAt(playerPos.x, playerPos.z).name);
+    // v8a #5: area-name banner on district entry (GTA's area card).
+    const district = districtAt(playerPos.x, playerPos.z);
+    setText('district', district.name);
+    if (district.id !== lastDistrictId) {
+      lastDistrictId = district.id;
+      if (S.screen === 'game') showAreaBanner(district.name, district.blurb || '');
+    }
     // Health / armour.
     const hp = $('health-bar'), ar = $('armour-bar');
     if (hp) hp.style.width = `${Math.max(0, S.health)}%`;
@@ -224,7 +244,10 @@ export function createHud(ctx) {
         const rows = police.responseList(playerPos).map((u) =>
           `<div class="police-row"><span class="police-unit">${u.callsign}</span><span class="police-state ${u.state === 'RAMMING' ? 'hot' : ''}">${u.state}</span><span class="police-dist">${u.dist}m</span></div>`).join('');
         const heliRow = police.heli ? `<div class="police-row"><span class="police-unit">AIR-1 HELI</span><span class="police-state hot">SPOTLIGHT</span><span class="police-dist">—</span></div>` : '';
-        const html = rows + heliRow;
+        // Heat bar (v8a #4): progress toward the next star.
+        const hp = police.heatProgress();
+        const heatRow = `<div class="police-row"><span class="police-unit">HEAT</span><span class="police-state">${'▓'.repeat(Math.round(hp * 5)).padEnd(5, '░')}</span><span class="police-dist">${Math.round(hp * 100)}%</span></div>`;
+        const html = heatRow + rows + heliRow;
         if (list.innerHTML !== html) list.innerHTML = html;
       } else setVisible('police-panel', false);
     }
@@ -254,6 +277,12 @@ export function createHud(ctx) {
       setText('banner-title', S.banner.text);
       setText('banner-sub', S.banner.sub || '');
     }
+    // Area-name banner (v8a #5).
+    setVisible('area-banner', !!S.areaBanner);
+    if (S.areaBanner) {
+      setText('area-name', S.areaBanner.name);
+      setText('area-blurb', S.areaBanner.blurb || '');
+    }
     setVisible('toast', !!S.toast);
     if (S.toast) setText('toast', S.toast.text);
     // Damage vignette.
@@ -261,6 +290,10 @@ export function createHud(ctx) {
     if (vig) vig.style.opacity = S.health < 30 ? String(0.35 + (30 - S.health) / 30 * 0.4) : '0';
     // Crosshair.
     setVisible('crosshair', !S.inCar && S.screen === 'game');
+    // v8c #21: the crosshair turns red while the soft lock-on holds a
+    // target, so the player can see the lock without looking away.
+    const ch = $('crosshair');
+    if (ch) ch.classList.toggle('locked', !!combat.lockTarget);
     drawMinimap(playerPos, playerHeading);
   }
 

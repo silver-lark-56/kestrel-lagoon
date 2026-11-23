@@ -23,6 +23,15 @@ export function freshState() {
     cash: 250, rep: 0,
     health: 100, armour: 0,
     wanted: 0, wantedTimer: 0, inSight: false, searchZone: 0,
+    heat: 0, // v8a #4: heat points — stars are derived from heat (34 = 1st star, then +100/star)
+    // v8a #6: leonida-style search state — the circle is centred where
+    // the player was LAST SEEN (not on the player) and grows while the
+    // cops sweep; hotScenes are crime scenes that re-raise the heat if
+    // the player walks back through them while clean.
+    searchCenter: null, // {x, z} while searching, else null
+    searchRadius: 0, // metres, grows 8/s while searching
+    lastSeen: null, // {x, z} where a cop last had eyes on the player
+    hotScenes: [], // {x, z, radius, until, playerInside}
     weaponIndex: 1,
     ammo: WEAPONS.map((w) => ({ mag: w.ammo === Infinity ? Infinity : w.ammo, reserve: w.reserve })),
     ownedWeapons: [0, 1],
@@ -34,7 +43,9 @@ export function freshState() {
     stageTimer: 0, objectiveDist: 0,
     radioIndex: 1, radioTrack: 0, radioTime: 0, radioOn: true,
     muted: false, volume: 0.7, sensitivity: 1, cameraMode: 0,
+    graphics: 'high', // v8c #20: graphics preset (low/medium/high/ultra)
     inCar: false, speedKmh: 0, vehicleName: '', vehicleHealth: 100, gear: 1,
+    interior: null, // v8c #14: shop id while inside a walk-in interior
     districtHeat: {}, // district id -> extra heat 0..5, decays over time
     cachesFound: [],
     propertiesOwned: [],
@@ -44,6 +55,7 @@ export function freshState() {
     stats: freshStats(),
     dialogue: null, // {speaker, role, color, text, until}
     banner: null, // {text, sub, until} big centre announcement
+    areaBanner: null, // {name, blurb, until} district-entry announcement (v8a #5)
     toast: null, // {text, until} small notice
     objective: null, // {x, z, label, dist}
     gameOverReason: '',
@@ -152,6 +164,12 @@ export function showBanner(text, sub = '', seconds = 3) {
   S.banner = { text, sub, until: performance.now() / 1000 + seconds };
 }
 
+// v8a #5: the district name + blurb shown when the player enters a new
+// area (GTA's area-name card). Same expiry pattern as showBanner.
+export function showAreaBanner(name, blurb, seconds = 4) {
+  S.areaBanner = { name, blurb, until: performance.now() / 1000 + seconds };
+}
+
 export function showToast(text, seconds = 3) {
   S.toast = { text, until: performance.now() / 1000 + seconds };
 }
@@ -214,6 +232,7 @@ export function loadSettings() {
     if (typeof d.sensitivity === 'number') S.sensitivity = d.sensitivity;
     if (typeof d.muted === 'boolean') S.muted = d.muted;
     if (typeof d.cameraMode === 'number') S.cameraMode = d.cameraMode;
+    if (typeof d.graphics === 'string') S.graphics = d.graphics;
   } catch { /* defaults stand */ }
 }
 
@@ -221,6 +240,7 @@ export function saveSettings() {
   try {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       volume: S.volume, sensitivity: S.sensitivity, muted: S.muted, cameraMode: S.cameraMode,
+      graphics: S.graphics,
     }));
   } catch { /* storage can be off */ }
 }

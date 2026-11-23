@@ -3,7 +3,8 @@
 // controls, settings and statistics. The map screen is also the hub for
 // starting jobs, races, gigs and property deals.
 import { S, saveToSlot, loadFromSlot, slotSummary, repTitle, skillLevels, completionPct, repNext } from './state.js';
-import { JOBS, DISTRICTS, WORLD, CREW, RACES, PROPERTIES, CACHES, RADIO, SHOPS, districtAt, personById } from './config.js';
+import { JOBS, DISTRICTS, WORLD, CREW, RACES, PROPERTIES, CACHES, RADIO, SHOPS, VEHICLE_MODELS, districtAt, personById } from './config.js';
+import { measureModel } from './vehicle-model.js';
 import { portraitURL } from './textures.js';
 
 const $ = (id) => document.getElementById(id);
@@ -15,9 +16,10 @@ export function createScreens(ctx) {
   let onStartGame = null; // set by main.js: (fresh) => void
   let onResume = null;
   let onQuitToTitle = null;
+  let graphics = null; // set by main.js: the graphics preset module (v8c #20)
 
   function show(id) {
-    for (const s of ['title-screen', 'pause-screen', 'map-screen', 'controls-screen', 'settings-screen', 'stats-screen']) {
+    for (const s of ['title-screen', 'pause-screen', 'map-screen', 'controls-screen', 'settings-screen', 'stats-screen', 'showroom-screen']) {
       const el = $(s);
       if (el) el.style.display = s === id ? '' : 'none';
     }
@@ -272,11 +274,48 @@ export function createScreens(ctx) {
       <div class="stat-row"><span>REP</span><b>${S.rep} · ${repTitle()}</b></div>`;
   }
 
+  // --- Showroom (v8b #8, neonbay measure() pattern, MIT) -------------------
+  // Every number is MEASURED from the car model itself on a flat test
+  // strip (vehicle-model.js measureModel, 120 Hz, same step that drives
+  // the player car) — nothing here is written by hand. Measured lazily
+  // on first open (~50 ms for all 8 models) and cached per model.
+  function renderShowroom() {
+    const body = $('showroom-body');
+    if (!body) return;
+    const rows = VEHICLE_MODELS.map((m) => {
+      const r = measureModel(m);
+      const t0100 = r.t0100 === null ? '—' : `${r.t0100.toFixed(1)}s`;
+      const price = m.price > 0 ? `$${m.price.toLocaleString()}` : 'KLPD ONLY';
+      return `<div class="showroom-row"><span class="sr-name">${m.name}</span><span class="sr-kind">${m.kind.toUpperCase()}</span><span class="sr-num">${t0100}</span><span class="sr-num">${Math.round(r.topKmh)} km/h</span><span class="sr-num">${r.brakeM.toFixed(1)} m</span><span class="sr-num">${r.driftLat.toFixed(1)} m/s</span><span class="sr-num">${price}</span></div>`;
+    }).join('');
+    body.innerHTML = `<div class="showroom-row showroom-head"><span>MODEL</span><span>CLASS</span><span class="sr-num">0–100</span><span class="sr-num">TOP SPEED</span><span class="sr-num">BRAKE 100–0</span><span class="sr-num">DRIFT</span><span class="sr-num">PRICE</span></div>${rows}` +
+      `<p class="showroom-note">Measured by the physics engine on a flat test strip — the same model that drives your car. 0–100 and top speed at full throttle; braking from 100 km/h; drift is the peak sideways slide in a 1&nbsp;s handbrake turn at 60&nbsp;km/h. Steal any of them with F — the lagoon's cheapest dealership.</p>`;
+  }
+
   // --- Wiring ---------------------------------------------------------------------
   let lastMenu = 'title-screen';
+
+  // Re-read every settings control from S: keys (G cycles the preset, V
+  // the camera) can change the state while the menu is closed, so the
+  // menu must not show a stale value when it opens.
+  function syncSettings() {
+    const vol = $('setting-volume');
+    if (vol) vol.value = Math.round(S.volume * 100);
+    const sens = $('setting-sensitivity');
+    if (sens) sens.value = Math.round(S.sensitivity * 100);
+    const cam = $('setting-camera');
+    if (cam) cam.value = String(S.cameraMode);
+    const radio = $('setting-radio');
+    if (radio) radio.value = String(S.radioIndex);
+    const gfx = $('setting-graphics');
+    if (gfx) gfx.value = S.graphics;
+  }
+
   function openSub(id, from) {
     lastMenu = from;
     if (id === 'stats-screen') renderStats();
+    if (id === 'showroom-screen') renderShowroom();
+    if (id === 'settings-screen') syncSettings();
     show(id);
   }
 
@@ -291,6 +330,8 @@ export function createScreens(ctx) {
     if (btnSettings) btnSettings.addEventListener('click', () => openSub('settings-screen', 'title-screen'));
     const btnStats = $('btn-stats');
     if (btnStats) btnStats.addEventListener('click', () => openSub('stats-screen', 'title-screen'));
+    const btnShowroom = $('btn-showroom');
+    if (btnShowroom) btnShowroom.addEventListener('click', () => openSub('showroom-screen', 'title-screen'));
     const btnPauseControls = $('btn-pause-controls');
     if (btnPauseControls) btnPauseControls.addEventListener('click', () => openSub('controls-screen', 'pause-screen'));
     const btnPauseSettings = $('btn-pause-settings');
@@ -311,23 +352,32 @@ export function createScreens(ctx) {
     if (btnMapClose) btnMapClose.addEventListener('click', () => { hideAll(); if (onResume) onResume(); });
     // Settings controls.
     const vol = $('setting-volume');
-    if (vol) { vol.value = Math.round(S.volume * 100); vol.addEventListener('input', () => { S.volume = vol.value / 100; audio.setVolume(S.volume); }); }
+    if (vol) { vol.addEventListener('input', () => { S.volume = vol.value / 100; audio.setVolume(S.volume); }); }
     const sens = $('setting-sensitivity');
-    if (sens) { sens.value = Math.round(S.sensitivity * 100); sens.addEventListener('input', () => { S.sensitivity = sens.value / 100; }); }
+    if (sens) { sens.addEventListener('input', () => { S.sensitivity = sens.value / 100; }); }
     const cam = $('setting-camera');
-    if (cam) { cam.value = String(S.cameraMode); cam.addEventListener('change', () => { S.cameraMode = parseInt(cam.value, 10); }); }
+    if (cam) { cam.addEventListener('change', () => { S.cameraMode = parseInt(cam.value, 10); }); }
     const radio = $('setting-radio');
     if (radio) {
       radio.innerHTML = RADIO.map((r, i) => `<option value="${i}">${r.freq} — ${r.genre}</option>`).join('');
-      radio.value = String(S.radioIndex);
       radio.addEventListener('change', () => { S.radioIndex = parseInt(radio.value, 10); audio.radioSwitch(); });
     }
+    // v8c #20: graphics preset — Low / Medium / High / Ultra.
+    const gfx = $('setting-graphics');
+    if (gfx) {
+      gfx.addEventListener('change', () => {
+        S.graphics = gfx.value;
+        if (graphics) graphics.setPreset(gfx.value);
+      });
+    }
+    syncSettings();
   }
 
   return {
-    show, hideAll, renderTitle, openMap, renderMapPanel, drawMap, renderStats, wire,
+    show, hideAll, renderTitle, openMap, renderMapPanel, drawMap, renderStats, renderShowroom, wire,
     set onStartGame(fn) { onStartGame = fn; },
     set onResume(fn) { onResume = fn; },
     set onQuitToTitle(fn) { onQuitToTitle = fn; },
+    setGraphics(g) { graphics = g; },
   };
 }

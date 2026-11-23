@@ -2,8 +2,8 @@
 // frame loop, routes input actions, expires timed UI, handles death and
 // respawn, and drives the ?shot= staging and the ?selftest= scripted check.
 import * as THREE from 'three';
-import { S, freshState, resetState, loadFromSlot, saveToSlot, loadSettings, saveSettings } from './state.js';
-import { createInput, weaponSlotOf, ACT_ENTER, ACT_RELOAD, ACT_MAP, ACT_PAUSE, ACT_INTERACT, ACT_RADIO_PREV, ACT_CAMERA, ACT_CREW_CYCLE, ACT_CREW_ABILITY, ACT_CREW_SELECT } from './input.js';
+import { S, freshState, resetState, loadFromSlot, saveToSlot, loadSettings, saveSettings, showToast } from './state.js';
+import { createInput, weaponSlotOf, ACT_ENTER, ACT_RELOAD, ACT_MAP, ACT_PAUSE, ACT_INTERACT, ACT_RADIO_PREV, ACT_CAMERA, ACT_CREW_CYCLE, ACT_CREW_ABILITY, ACT_CREW_SELECT, ACT_GRAPHICS } from './input.js';
 import { createAudio } from './audio.js';
 import { createRender } from './render.js';
 import { buildCity } from './city.js';
@@ -18,6 +18,12 @@ import { createMissions } from './missions.js';
 import { createActivities } from './activities.js';
 import { createHud } from './hud.js';
 import { createScreens } from './screens.js';
+import { createTouchControls } from './touch.js';
+import { createWeather } from './weather.js';
+import { createGraphics, PRESETS } from './graphics.js';
+import { createBloom } from './bloom.js';
+import { createLights } from './lights.js';
+import { createStores } from './stores.js';
 import { stageShot, shotFromURL, selftestFromURL } from './shots.js';
 
 window.__errors = [];
@@ -27,6 +33,12 @@ window.addEventListener('unhandledrejection', (e) => window.__errors.push('rejec
 const canvas = document.getElementById('game-canvas');
 const render = createRender(canvas);
 const { scene, camera } = render;
+
+// v8c #18: bloom, behind the graphics preset (Ultra only), DEFAULT OFF.
+// The post hook is always set; with bloom disabled its render() is a
+// no-op, so the staged captures run the exact pre-v8c render path.
+const bloom = createBloom(render.renderer);
+render.setPostRenderer(() => bloom.render());
 
 // Warm stage light for the title shot only: at sunset the sun sits WSW
 // behind the title camera, so Rook's camera-facing side is lit only by
@@ -40,11 +52,16 @@ titleLight.visible = false;
 scene.add(titleLight);
 const audio = createAudio();
 const input = createInput(canvas);
+const touch = createTouchControls(input); // null on non-touch devices
 loadSettings();
 
 const city = buildCity(scene, 1);
 render.bindLamps(city.dynamic.bulbMat);
 render.bindFacades(city.dynamic.facadeMats);
+// v8c #19: the light budget — pooled streetlights, the actor lamp and
+// the car headlights. All start at intensity 0; update() (gated to
+// normal play, below) fades them in with the dark.
+const lights = createLights(scene, city.lampSpots);
 const traffic = createTraffic(scene, 1, city.colliders);
 const peds = createPedestrians(scene, 1, city.colliders);
 const playerObj = createPlayer(scene);
@@ -56,15 +73,60 @@ const missions = createMissions({ city, driving, combat, police, crew, traffic, 
 const activities = createActivities({ city, driving, police, audio });
 const hud = createHud({ police, combat, crew });
 const screens = createScreens({ missions, activities, audio });
+const weather = createWeather(scene, audio);
+// v8c #14: walk-in shops — roadside doors + furnished interiors.
+const stores = createStores(scene, { player: playerObj, audio });
+
+// v8c #20: graphics presets + adaptive resolution. The apply callback is
+// the one place a preset touches the world: pixel ratio, bloom (#18),
+// rain density and the streetlight pool size (#19). The default preset
+// (High) reproduces the pre-v8c behaviour exactly — pixel ratio capped
+// at 1.5, bloom off, full rain — so staging and the self-test are
+// untouched by this module's existence.
+const graphics = createGraphics((def, scale) => {
+  render.setPixelRatio(scale);
+  bloom.setEnabled(def.bloom);
+  bloom.resize();
+  weather.setDensity(def.rain);
+  lights.setPoolSize(def.lights);
+});
+graphics.setPreset(S.graphics);
+screens.setGraphics(graphics);
 
 const ctx = { city, traffic, peds, player: playerObj, driving, police, combat, crew, missions, activities, hud, screens, audio, input, render };
+
+// Read-only probe hook for the CDP verification scripts (same pattern as
+// window.__selftest / __shotReady): lets a probe confirm the player moved,
+// the touch layer is live, or the weather is raining, without reaching
+// into module internals.
+window.__probe = {
+  player: () => ({ x: playerObj.p.x, z: playerObj.p.z }),
+  camYaw: () => playerObj.p.camYaw,
+  camera: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
+  speedKmh: () => S.speedKmh,
+  screen: () => S.screen,
+  inCar: () => S.inCar,
+  touch: () => (touch ? touch.state() : null),
+  weather: () => weather.state(),
+  graphics: () => graphics.state(),
+  bloom: () => bloom.state(),
+  lights: () => lights.state(),
+  lock: () => combat.lockTarget,
+  fov: () => playerObj.p.fov,
+  stores: () => stores.state(),
+};
 
 let lastTime = performance.now() / 1000;
 let titleOrbit = 0;
 let shotName = shotFromURL();
 let selftest = selftestFromURL();
+// Staging and the self-test always run the High preset: a deterministic
+// capture must never depend on a saved Ultra setting (bloom on) from an
+// earlier session. In-memory only — nothing here persists the override.
+if (shotName || selftest) { S.graphics = 'high'; graphics.setPreset('high'); }
 let shotFrames = 0;
 let deathTimer = 0;
+let prevPlayerPos = null; // previous frame's player position, for the police pursuit lead
 
 // Self-test state (declared up here: startSelftest runs during boot, below).
 let stSteps = [];
@@ -74,6 +136,8 @@ let stResults = [];
 let stSavedCash = 0;
 
 screens.onStartGame = (fresh) => {
+  // A new or continued game never starts inside a shop (v8c #14).
+  if (S.interior) stores.exit();
   if (fresh) {
     resetState();
     playerObj.teleport(-200, 140, Math.PI * 0.25);
@@ -103,17 +167,24 @@ if (selftest) {
   startSelftest();
 }
 
-window.addEventListener('resize', () => render.resize());
+window.addEventListener('resize', () => { render.resize(); bloom.resize(); });
 
 function expireTimedUI(now) {
   if (S.dialogue && now > S.dialogue.until) S.dialogue = null;
   if (S.banner && now > S.banner.until) S.banner = null;
+  if (S.areaBanner && now > S.areaBanner.until) S.areaBanner = null;
   if (S.toast && now > S.toast.until) S.toast = null;
 }
 
 function handleActions(actions) {
   const slot = weaponSlotOf(actions);
   if (slot >= 0) combat.switchWeapon(slot);
+  // v8c #14: while the player is inside a shop, the world-facing
+  // position is the shop door (map, jobs, outdoor shop trigger) — the
+  // real position is the room at x = 3000.
+  const worldPos = S.interior && stores.doorPos()
+    ? stores.doorPos()
+    : { x: playerObj.p.x, z: playerObj.p.z };
   if (actions & ACT_ENTER) {
     if (S.inCar) {
       const spot = driving.exitCar();
@@ -129,20 +200,22 @@ function handleActions(actions) {
   if (actions & ACT_RELOAD) combat.reload();
   if (actions & ACT_MAP) {
     if (S.screen === 'map') screens.hideAll();
-    else if (S.screen === 'game') screens.openMap({ x: playerObj.p.x, z: playerObj.p.z });
+    else if (S.screen === 'game') screens.openMap(worldPos);
   }
   if (actions & ACT_PAUSE) {
     if (S.screen === 'game') screens.show('pause-screen');
     else if (S.screen === 'pause') screens.hideAll();
     else if (S.screen === 'map') screens.hideAll();
-    else if (S.screen === 'controls' || S.screen === 'settings' || S.screen === 'stats') screens.show('title-screen');
+    else if (S.screen === 'controls' || S.screen === 'settings' || S.screen === 'stats' || S.screen === 'showroom') screens.show('title-screen');
   }
   if (actions & ACT_INTERACT) {
-    const pos = { x: playerObj.p.x, z: playerObj.p.z };
-    const shop = activities.nearestShop(pos);
+    // v8c #14: at a shop counter inside, E shops there; otherwise the
+    // outdoor proximity shop (or a nearby job marker) as before.
+    const shop = stores.counterShop({ x: playerObj.p.x, z: playerObj.p.z })
+      || activities.nearestShop(worldPos);
     if (shop) activities.useShop(shop);
     else {
-      const near = missions.nearestAvailableJob(pos);
+      const near = missions.nearestAvailableJob(worldPos);
       if (near && near.dist < 15) missions.startJob(near.job.id);
     }
   }
@@ -155,6 +228,12 @@ function handleActions(actions) {
   if (actions & ACT_CREW_CYCLE) crew.cycleOrder();
   if (actions & ACT_CREW_ABILITY) crew.ability();
   if (actions & ACT_CREW_SELECT) S.crewSelected = (S.crewSelected + 1) % 3;
+  if (actions & ACT_GRAPHICS) {
+    const name = graphics.cyclePreset();
+    S.graphics = name;
+    saveSettings();
+    showToast(`Graphics: ${PRESETS[name].label}`);
+  }
 }
 
 function frame() {
@@ -173,6 +252,9 @@ function frame() {
 
   // Timed UI expiry runs everywhere.
   expireTimedUI(now);
+
+  // Touch layer visibility mirrors the HUD (in-game only).
+  if (touch) touch.update();
 
   // Shot readiness: after enough FRAMES (not wall time — headless runs slow),
   // flag the capture script so the camera has settled and the chase has formed.
@@ -222,6 +304,11 @@ function frame() {
   }
 
   if (S.screen === 'title') {
+    // The aim/drive FOV (v8c #21) must not leak into the title orbit or
+    // the staged title shot: both run at the base 62°.
+    if (Math.abs(camera.fov - 62) > 0.01 || Math.abs(playerObj.p.fov - 62) > 0.01) {
+      camera.fov = 62; playerObj.p.fov = 62; camera.updateProjectionMatrix();
+    }
     if (shotName === 'title') {
       // Staged title: street level on the marina road, Rook + his
       // Peregrine in the foreground, the ferris wheel looming behind
@@ -242,9 +329,16 @@ function frame() {
       camera.position.set(Math.cos(titleOrbit) * 170, 55, Math.sin(titleOrbit) * 170);
       camera.lookAt(0, 0, 0);
     }
-    traffic.update(dt, { x: 0, z: 0 }, null);
+    traffic.update(dt, { x: 0, z: 0 }, null, S.clock * 20);
     peds.update(dt, null, { x: 0, z: 0 });
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());
+    city.dynamic.updateTrafficLights(S.clock * 20);
+    // Rain over the title orbit in normal play; never in a staged shot.
+    if (!shotName) weather.update(dt, camera);
+    // Adaptive resolution runs over the title orbit too (same renderer);
+    // never in a staged shot, where a moving pixel ratio would break
+    // the deterministic capture.
+    if (!shotName) graphics.update(dt);
     render.render();
     return;
   }
@@ -259,11 +353,36 @@ function frame() {
       driving.update(dt, input, city.colliders, false);
       const car = driving.getCar();
       if (car) { pp.x = car.x; pp.z = car.z; }
+      // Mouse-look / touch look-drag while driving: player.update()
+      // (the only takeMouse consumer) never runs in a car, so the look
+      // deltas accumulated unspent and hit the camera on exit. Consume
+      // them here with the same sensitivity; the chase camera's blend
+      // toward the car heading re-centres the view afterwards.
+      const mouse = input.takeMouse();
+      pp.camYaw -= mouse.dx * 0.0028 * S.sensitivity;
+      pp.camPitch = Math.max(0.08, Math.min(1.1, pp.camPitch + mouse.dy * 0.0022 * S.sensitivity));
     } else {
-      playerObj.update(dt, input, city.colliders, false);
+      // v8c #14: inside a shop the interior walls are the colliders.
+      playerObj.update(dt, input, S.interior ? stores.colliders : city.colliders, false);
     }
-    S.playerX = pp.x; S.playerZ = pp.z;
     const playerPos = { x: pp.x, z: pp.z };
+    // v8c #14: while the player is inside a shop, the world systems
+    // (traffic, peds, police, crew, missions, HUD) see the shop door —
+    // the cops gather outside, the crew waits there, the minimap stays
+    // on the city — while the player themself is in the room at x=3000.
+    const worldPos = S.interior && stores.doorPos() ? stores.doorPos() : playerPos;
+    S.playerX = worldPos.x; S.playerZ = worldPos.z;
+
+    // v8c #21: soft lock-on while aiming on foot — the aim snaps to the
+    // closest target in a 20° cone and the camera steers onto it, so
+    // the shot below goes where the crosshair sits. Never during
+    // staging (p.aiming is false there: no mouse is held).
+    if (inGame && !S.inCar && pp.aiming) {
+      const lock = combat.updateLockOn(playerPos, pp.camYaw, true);
+      if (lock) playerObj.steerToTarget(dt, lock, pp.mouseActive);
+    } else {
+      combat.updateLockOn(playerPos, pp.camYaw, false);
+    }
 
     // Firing (mouse held): on foot, or drive-by from the car.
     if (inGame && input.firing) {
@@ -276,22 +395,37 @@ function frame() {
 
     // World systems.
     const gunfire = combat.gunfireAt;
-    traffic.update(dt, playerPos, gunfire);
-    peds.update(dt, gunfire, playerPos);
-    police.update(dt, playerPos, S.speedKmh);
-    combat.update(dt, playerPos);
-    crew.update(dt, playerPos, S.inCar, combat.enemies);
-    missions.update(dt, playerPos);
+    traffic.update(dt, worldPos, gunfire, S.clock * 20);
+    peds.update(dt, gunfire, worldPos);
+    // Player velocity for the police pursuit lead (clamped: teleports
+    // would otherwise spike it for a frame).
+    let playerVel = { x: 0, z: 0 };
+    if (prevPlayerPos) {
+      playerVel = { x: (worldPos.x - prevPlayerPos.x) / Math.max(dt, 1e-3), z: (worldPos.z - prevPlayerPos.z) / Math.max(dt, 1e-3) };
+      const vl = Math.hypot(playerVel.x, playerVel.z);
+      if (vl > 70) { playerVel.x *= 70 / vl; playerVel.z *= 70 / vl; }
+    }
+    prevPlayerPos = { x: worldPos.x, z: worldPos.z };
+    police.update(dt, worldPos, S.speedKmh, playerVel);
+    combat.update(dt, worldPos);
+    crew.update(dt, worldPos, S.inCar, combat.enemies);
+    missions.update(dt, worldPos);
     activities.updateClock(dt);
-    activities.updateRace(dt, playerPos);
-    activities.updateTaxi(dt, playerPos);
-    activities.checkCaches(playerPos);
+    activities.updateRace(dt, worldPos);
+    activities.updateTaxi(dt, worldPos);
+    activities.checkCaches(worldPos);
     audio.update(dt, S.speedKmh, S.wanted);
+
+    // v8c #14: shop doors + interiors — gameplay only, never in a
+    // staged shot or the self-test.
+    if (!shotName && !selftest) stores.update(dt, playerPos, S.inCar);
 
     // Camera + sky.
     const car = driving.getCar();
-    playerObj.updateCamera(dt, camera, car ? { x: car.x, z: car.z } : null, car ? car.heading : undefined);
+    playerObj.updateCamera(dt, camera, car ? { x: car.x, z: car.z } : null, car ? car.heading : undefined,
+      { staging: !!shotName, speedKmh: S.speedKmh, colliders: S.interior ? stores.colliders : city.colliders });
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());
+    city.dynamic.updateTrafficLights(S.clock * 20);
 
     // Death + respawn.
     if (S.health <= 0) {
@@ -305,6 +439,9 @@ function frame() {
         police.clearAll();
         combat.clearEnemies();
         driving.destroyCar();
+        // Dying inside a shop (v8c #14) drops the player back outside
+        // first, so the respawn never leaves a stale interior behind.
+        if (S.interior) stores.exit();
         playerObj.teleport(-210, 150, 0);
         crew.teleportBeside(-210, 150);
         S.banner = { text: 'WASTED', sub: `The lagoon keeps $${lost.toLocaleString()} of your cash.`, until: now + 3 };
@@ -312,11 +449,25 @@ function frame() {
     }
 
     // HUD.
-    if (inGame) hud.update(playerPos, S.inCar && car ? car.heading : pp.camYaw);
+    if (inGame) hud.update(worldPos, S.inCar && car ? car.heading : pp.camYaw);
     // Ferris wheel + water drift.
     if (city.dynamic.wheel) city.dynamic.wheel.rotation.z += dt * 0.12;
     if (city.dynamic.water) { city.dynamic.water.position.x = Math.sin(now * 0.05) * 2; }
     if (city.dynamic.beaconRing) city.dynamic.beaconRing.rotation.z += dt;
+    // Rain + lightning: gameplay only — never in a staged shot or the
+    // self-test. Runs after applyTimeOfDay so the fog pull-in sticks.
+    // Indoors (v8c #14) the rain stays outside: no volume, no fog
+    // pull-in, no new lightning, no rain sound.
+    if (!shotName && !selftest) weather.update(dt, camera, !!S.interior);
+    // Light budget: same gate — the pooled lamps, actor lamp and
+    // headlights must never touch a staged capture's lighting.
+    if (!shotName && !selftest) {
+      const nightK = activities.isNight() ? 1 : activities.isSunset() ? 0.6 : 0;
+      lights.update(dt, playerPos, nightK, S.inCar && car ? { x: car.x, z: car.z, heading: car.heading } : null);
+    }
+    // Adaptive resolution: same gate as the rain — a moving pixel ratio
+    // must never touch a staged capture or a scripted check.
+    if (!shotName && !selftest) graphics.update(dt);
   }
 
   render.render();
