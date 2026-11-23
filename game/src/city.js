@@ -22,6 +22,19 @@ export function isRoad(x, z) {
   return false;
 }
 
+// v8a #9: traffic-light state per intersection (pattern: fable city.js
+// lightState — 16 s cycle, per-junction phase offset so neighbouring
+// lights don't flip together). NS green on phase 0–8, EW green on
+// 8–16; the last 2 s of each green is yellow. `time` is game-seconds
+// (S.clock * 20), so one cycle is 16 real seconds.
+export function lightState(ix, iz, axis, time) {
+  const offset = ((ix * 7 + iz * 3) % 4) * 4;
+  const phase = (((time + offset) % 16) + 16) % 16;
+  const inGreen = axis === 'NS' ? phase : phase - 8;
+  if (inGreen < 0 || inGreen >= 8) return 'red';
+  return inGreen < 6 ? 'green' : 'yellow';
+}
+
 export function nearestRoadPoint(x, z) {
   let bx = ROAD_XS[0], bz = ROAD_ZS[0], bd = Infinity;
   for (const rx of ROAD_XS) { const d = Math.abs(x - rx); if (d < bd) { bd = d; bx = rx; } }
@@ -90,15 +103,19 @@ export function buildCity(scene, seed) {
   }
 
   // --- Buildings (instanced per facade palette) -----------------------------
+  // v8a #1: six palettes in three styles — glass towers, brick low-rise,
+  // concrete commercial. Style follows height (tall -> glass), so the
+  // skyline reads as a real downtown instead of one repeated stucco box.
   const boxGeo = new THREE.BoxGeometry(1, 1, 1);
   boxGeo.translate(0, 0.5, 0);
+  const STYLES = ['glass', 'glass', 'brick', 'brick', 'concrete', 'concrete'];
   const palettes = [];
   for (let p = 0; p < 6; p++) {
-    const tex = facadeTexture(seed * 7 + p * 13, 5);
+    const tex = facadeTexture(seed * 7 + p * 13, 5, STYLES[p]);
     // Emissive map: the same lit windows + shopfront, glowing after dark.
     // Intensity is driven by render.applyTimeOfDay (0 by day, so the day
     // look is byte-identical to before).
-    palettes.push({ mat: new THREE.MeshLambertMaterial({ map: tex.map, emissiveMap: tex.emissive, emissive: 0xffffff, emissiveIntensity: 0 }), list: [] });
+    palettes.push({ mat: new THREE.MeshLambertMaterial({ map: tex.map, emissiveMap: tex.emissive, emissive: 0xffffff, emissiveIntensity: 0 }), list: [], setbacks: [] });
   }
   dynamic.facadeMats = palettes.map((p) => p.mat);
   const roofMat = new THREE.MeshLambertMaterial({ color: 0x4a4f58 });
@@ -116,6 +133,15 @@ export function buildCity(scene, seed) {
       blocks.push({ cx, cz, bw, bd });
     }
   }
+  // Silhouette variety (v8a #1): stepped setback tiers on tall towers,
+  // rooftop clutter (AC units, antennas, water tanks) and a few glass
+  // cylinder towers. All assignments derive from the building index or
+  // its own dimensions — NO new rng calls here, so the city layout stays
+  // byte-identical to v7 (the palette pick below still consumes exactly
+  // one rng.int per building, only the range changes with height).
+  const cylList = [];
+  const roofProps = { ac: [], ant: [], tank: [] };
+  let bi = 0, tallCount = 0;
   for (const b of blocks) {
     const downtown = Math.abs(b.cx) < 160 && Math.abs(b.cz) < 200;
     const n = downtown ? rng.int(1, 2) : rng.int(1, 3);
@@ -134,8 +160,34 @@ export function buildCity(scene, seed) {
       // it, not in front of it.
       const inCorridor = Math.abs(z) < 45 && x > -140 && x < 160;
       const hh = !inCorridor ? h : Math.abs(z) < 18 ? Math.min(h, 14) : Math.min(h, 26);
-      const pal = downtown ? rng.int(0, 5) : rng.int(0, 5);
-      palettes[pal].list.push({ x, z, w, h: hh, d });
+      // Height picks the style: towers are glass, mid-rise is concrete,
+      // low-rise is brick. One rng.int per building, as before.
+      const pal = hh >= 30 ? rng.int(0, 1) : hh >= 14 ? rng.int(4, 5) : rng.int(2, 3);
+      // Every 9th tall downtown tower is a glass cylinder (never in the
+      // corridor: the clamp caps corridor height at 26 m < 34 m).
+      let isCyl = false;
+      if (downtown && hh >= 34) {
+        tallCount++;
+        if (tallCount % 9 === 0) {
+          isCyl = true;
+          cylList.push({ x, z, r: Math.min(w, d) / 2, h: hh });
+        }
+      }
+      if (!isCyl) {
+        palettes[pal].list.push({ x, z, w, h: hh, d });
+        // Stepped setback tier on tall towers: a smaller box crowning
+        // the roof, same facade — the skyline stops being a flat row.
+        if (hh >= 30) palettes[pal].setbacks.push({ x, z, w: w * 0.62, h: hh * 0.22, d: d * 0.62, y: hh });
+      }
+      // Rooftop clutter on low/mid roofs (tall towers already have their
+      // setback tier; inner-corridor roofs stay clean for the gantry).
+      const innerCorridor = Math.abs(z) < 18 && x > -140 && x < 160;
+      if (!isCyl && hh < 30 && !innerCorridor) {
+        if (bi % 3 === 0) roofProps.ac.push({ x: x - w * 0.3, z: z + d * 0.28, y: hh });
+        if (bi % 5 === 0) roofProps.ant.push({ x: x + w * 0.32, z: z - d * 0.28, y: hh });
+        if (bi % 7 === 0) roofProps.tank.push({ x: x + w * 0.28, z: z + d * 0.3, y: hh });
+      }
+      bi++;
       colliders.push({ x0: x - w / 2, z0: z - d / 2, x1: x + w / 2, z1: z + d / 2 });
     }
   }
@@ -151,6 +203,48 @@ export function buildCity(scene, seed) {
     });
     inst.instanceMatrix.needsUpdate = true;
     group.add(inst);
+    // Setback tiers: same facade, crowning the tall towers.
+    if (p.setbacks.length > 0) {
+      const tiers = new THREE.InstancedMesh(boxGeo, p.mat, p.setbacks.length);
+      p.setbacks.forEach((b, i) => {
+        dummy.position.set(b.x, b.y, b.z);
+        dummy.scale.set(b.w, b.h, b.d);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        tiers.setMatrixAt(i, dummy.matrix);
+      });
+      tiers.instanceMatrix.needsUpdate = true;
+      group.add(tiers);
+    }
+  }
+  // Glass cylinder towers: palette-0 glass textures cloned with a 3x
+  // horizontal repeat, so the window grid wraps the tower at a sane
+  // scale instead of stretching once around the circumference.
+  if (cylList.length > 0) {
+    const cylMap = palettes[0].mat.map.clone();
+    cylMap.wrapS = THREE.RepeatWrapping; cylMap.repeat.set(3, 1); cylMap.needsUpdate = true;
+    const cylEm = palettes[0].mat.emissiveMap.clone();
+    cylEm.wrapS = THREE.RepeatWrapping; cylEm.repeat.set(3, 1); cylEm.needsUpdate = true;
+    const cylMat = new THREE.MeshLambertMaterial({ map: cylMap, emissiveMap: cylEm, emissive: 0xffffff, emissiveIntensity: 0 });
+    dynamic.facadeMats.push(cylMat); // lit windows at night, like the rest
+    const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 14);
+    cylGeo.translate(0, 0.5, 0);
+    const cyls = new THREE.InstancedMesh(cylGeo, cylMat, cylList.length);
+    const caps = new THREE.InstancedMesh(cylGeo, roofMat, cylList.length);
+    cylList.forEach((b, i) => {
+      dummy.position.set(b.x, 0, b.z);
+      dummy.scale.set(b.r, b.h, b.r);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      cyls.setMatrixAt(i, dummy.matrix);
+      dummy.position.set(b.x, b.h, b.z);
+      dummy.scale.set(b.r + 0.4, 0.6, b.r + 0.4);
+      dummy.updateMatrix();
+      caps.setMatrixAt(i, dummy.matrix);
+    });
+    cyls.instanceMatrix.needsUpdate = true;
+    caps.instanceMatrix.needsUpdate = true;
+    group.add(cyls); group.add(caps);
   }
   // Roof caps: one thin instanced box per building, slightly wider.
   const allB = palettes.flatMap((p) => p.list);
@@ -164,6 +258,29 @@ export function buildCity(scene, seed) {
   });
   roofs.instanceMatrix.needsUpdate = true;
   group.add(roofs);
+  // Rooftop clutter (gta-clone pattern: AC units + antennas, plus water
+  // tanks): instanced, one mesh per prop type.
+  const propMat = new THREE.MeshLambertMaterial({ color: 0x55565c });
+  const tankMat = new THREE.MeshLambertMaterial({ color: 0x8a8f98 });
+  const propMeshes = [
+    { list: roofProps.ac, geo: new THREE.BoxGeometry(2.2, 1.4, 2.2), mat: propMat, dy: 0.7 },
+    { list: roofProps.ant, geo: new THREE.CylinderGeometry(0.08, 0.08, 7, 4), mat: propMat, dy: 3.5 },
+    { list: roofProps.tank, geo: new THREE.CylinderGeometry(1.6, 1.6, 2.4, 10), mat: tankMat, dy: 1.2 },
+    { list: roofProps.tank, geo: new THREE.ConeGeometry(1.8, 1.0, 10), mat: tankMat, dy: 2.9 },
+  ];
+  for (const pm of propMeshes) {
+    if (pm.list.length === 0) continue;
+    const im = new THREE.InstancedMesh(pm.geo, pm.mat, pm.list.length);
+    pm.list.forEach((b, i) => {
+      dummy.position.set(b.x, b.y + pm.dy, b.z);
+      dummy.scale.set(1, 1, 1);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      im.setMatrixAt(i, dummy.matrix);
+    });
+    im.instanceMatrix.needsUpdate = true;
+    group.add(im);
+  }
 
   // --- Palms (instanced trunks + crowns) ------------------------------------
   const palmSpots = [];
@@ -224,6 +341,63 @@ export function buildCity(scene, seed) {
   poles.instanceMatrix.needsUpdate = true;
   bulbs.instanceMatrix.needsUpdate = true;
   group.add(poles); group.add(bulbs);
+
+  // --- Traffic lights ---------------------------------------------------------
+  // v8a #9: one pole per intersection (NE kerb), two heads (NS + EW),
+  // three bulbs each. Fully deterministic from ix/iz — no rng calls,
+  // so the city layout stream is untouched. Bulb colours update ~5x/s
+  // from lightState via dynamic.updateTrafficLights.
+  const lightBulbs = []; // {ix, iz, axis, role} in mesh order
+  const tlSpots = [];
+  for (let ix = 0; ix < ROAD_XS.length; ix++) {
+    for (let iz = 0; iz < ROAD_ZS.length; iz++) {
+      tlSpots.push({ x: ROAD_XS[ix] + 6.8, z: ROAD_ZS[iz] + 6.8, ix, iz });
+    }
+  }
+  const tlPoleGeo = new THREE.CylinderGeometry(0.12, 0.16, 5.5, 5);
+  tlPoleGeo.translate(0, 2.75, 0);
+  const tlPoles = new THREE.InstancedMesh(tlPoleGeo, new THREE.MeshLambertMaterial({ color: 0x3a3f47 }), tlSpots.length);
+  const tlHeadsNS = new THREE.InstancedMesh(new THREE.BoxGeometry(0.5, 1.8, 0.3), new THREE.MeshLambertMaterial({ color: 0x22262b }), tlSpots.length);
+  const tlHeadsEW = new THREE.InstancedMesh(new THREE.BoxGeometry(0.3, 1.8, 0.5), new THREE.MeshLambertMaterial({ color: 0x22262b }), tlSpots.length);
+  const tlBulbs = new THREE.InstancedMesh(new THREE.SphereGeometry(0.14, 8, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }), tlSpots.length * 6);
+  const BULB_Y = { red: 5.2, yellow: 4.7, green: 4.2 };
+  let bulbIdx = 0;
+  tlSpots.forEach((p, i) => {
+    dummy.position.set(p.x, 0, p.z); dummy.scale.set(1, 1, 1); dummy.rotation.set(0, 0, 0);
+    dummy.updateMatrix(); tlPoles.setMatrixAt(i, dummy.matrix);
+    // NS head faces south (-z, toward northbound traffic); EW head west.
+    dummy.position.set(p.x, 4.7, p.z - 0.15); dummy.updateMatrix(); tlHeadsNS.setMatrixAt(i, dummy.matrix);
+    dummy.position.set(p.x - 0.15, 4.7, p.z); dummy.updateMatrix(); tlHeadsEW.setMatrixAt(i, dummy.matrix);
+    for (const role of ['red', 'yellow', 'green']) {
+      dummy.position.set(p.x, BULB_Y[role], p.z - 0.32); dummy.updateMatrix();
+      tlBulbs.setMatrixAt(bulbIdx, dummy.matrix);
+      lightBulbs.push({ ix: p.ix, iz: p.iz, axis: 'NS', role });
+      bulbIdx++;
+    }
+    for (const role of ['red', 'yellow', 'green']) {
+      dummy.position.set(p.x - 0.32, BULB_Y[role], p.z); dummy.updateMatrix();
+      tlBulbs.setMatrixAt(bulbIdx, dummy.matrix);
+      lightBulbs.push({ ix: p.ix, iz: p.iz, axis: 'EW', role });
+      bulbIdx++;
+    }
+  });
+  tlPoles.instanceMatrix.needsUpdate = true;
+  tlHeadsNS.instanceMatrix.needsUpdate = true;
+  tlHeadsEW.instanceMatrix.needsUpdate = true;
+  tlBulbs.instanceMatrix.needsUpdate = true;
+  group.add(tlPoles); group.add(tlHeadsNS); group.add(tlHeadsEW); group.add(tlBulbs);
+  const TL_LIT = { red: new THREE.Color(0xff2a2a), yellow: new THREE.Color(0xffd42a), green: new THREE.Color(0x2aff66) };
+  const TL_DARK = new THREE.Color(0x1a1a1a);
+  let lastLightUpdate = -1;
+  dynamic.updateTrafficLights = (time) => {
+    if (Math.abs(time - lastLightUpdate) < 0.2) return;
+    lastLightUpdate = time;
+    for (let i = 0; i < lightBulbs.length; i++) {
+      const b = lightBulbs[i];
+      tlBulbs.setColorAt(i, lightState(b.ix, b.iz, b.axis, time) === b.role ? TL_LIT[b.role] : TL_DARK);
+    }
+    if (tlBulbs.instanceColor) tlBulbs.instanceColor.needsUpdate = true;
+  };
   dynamic.bulbMat = bulbMat;
 
   // --- Neon signs + billboards -------------------------------------------------

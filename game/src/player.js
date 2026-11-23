@@ -7,7 +7,8 @@ import { buildPersonMesh } from './pedestrians.js';
 import { resolveCircle, clampToWorld } from './city.js';
 
 export function createPlayer(scene) {
-  const mesh = buildPersonMesh(0xff8a3c, 0xe8b98d, 1.05);
+  const mesh = buildPersonMesh(0xff8a3c, 0xe8b98d, 1.05,
+    { hair: 0x2b2018, hairStyle: 'short', accessory: 'cap', accessoryColor: 0x1c2a4a });
   scene.add(mesh);
   const p = {
     mesh, x: -200, z: 140, heading: Math.PI * 0.25, walkPhase: 0,

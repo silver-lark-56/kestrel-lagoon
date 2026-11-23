@@ -12,7 +12,7 @@ const ORDER_LIST = ['FOLLOW', 'HOLD', 'ATTACK', 'DISTRACT'];
 
 export function createCrew(scene, colliders, driving, police) {
   const members = CREW.map((def, i) => {
-    const mesh = buildPersonMesh(def.color, def.skin, 1.02);
+    const mesh = buildPersonMesh(def.color, def.skin, 1.02, { hair: def.hair, hairStyle: def.hairStyle });
     mesh.position.set(-200 + i * 3, 0, 144 + i * 2);
     mesh.visible = false;
     scene.add(mesh);
@@ -56,7 +56,7 @@ export function createCrew(scene, colliders, driving, police) {
     } else if (m.def.id === 'ivo') {
       police.blackout();
       if (S.wanted > 0) {
-        S.wanted = Math.max(0, S.wanted - 1);
+        police.dropStar(); // heat cools by one band with the star
         showToast(`Ivo killed the feed — wanted ${S.wanted}★`);
       } else showToast('Ivo killed the CCTV feed');
       showBanner('IVO — BLACKOUT', 'GHOSTLINE cut the cameras. The heli is blind.');

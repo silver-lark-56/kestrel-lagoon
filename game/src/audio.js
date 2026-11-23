@@ -18,6 +18,7 @@ export function createAudio() {
   let engineOsc = null, engineGain = null, engineFilter = null;
   let sirenOsc = null, sirenGain = null, sirenTimer = 0;
   let radioTimer = null, radioStep = 0;
+  let rainSrc = null, rainGain = null;
   let started = false;
 
   function ensure() {
@@ -119,6 +120,26 @@ export function createAudio() {
     gunshot() { noiseBurst(0.12, 0.5, false); blip(160, 0.08, 'square', 0.2); },
     punch() { noiseBurst(0.08, 0.3, true); },
     crash() { noiseBurst(0.3, 0.5, true); blip(70, 0.25, 'sawtooth', 0.25); },
+    thunder() { noiseBurst(2.2, 0.5, true); blip(48, 1.8, 'sine', 0.25); },
+    // Rain ambience: one looping filtered-noise source, gain follows the
+    // weather intensity. Created lazily on the first rain — while dry,
+    // this returns before ensure() so no AudioContext is even built.
+    setRain(level) {
+      if (level <= 0.01 && !rainSrc) return;
+      if (!ensure() || !ctx) return;
+      if (!rainSrc) {
+        const len = ctx.sampleRate * 2;
+        const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+        const data = buf.getChannelData(0);
+        for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+        rainSrc = ctx.createBufferSource(); rainSrc.buffer = buf; rainSrc.loop = true;
+        const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 1400;
+        rainGain = ctx.createGain(); rainGain.gain.value = 0;
+        rainSrc.connect(f); f.connect(rainGain); rainGain.connect(sfxGain);
+        rainSrc.start();
+      }
+      if (rainGain) rainGain.gain.setTargetAtTime(Math.max(0, Math.min(1, level)) * 0.14, ctx.currentTime, 0.5);
+    },
     pickup() { blip(660, 0.1, 'sine', 0.2); setTimeout(() => blip(990, 0.14, 'sine', 0.2), 90); },
     cash() { blip(880, 0.09, 'triangle', 0.2); setTimeout(() => blip(1320, 0.12, 'triangle', 0.18), 80); },
     click() { blip(1200, 0.05, 'sine', 0.12); },

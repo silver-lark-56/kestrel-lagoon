@@ -18,6 +18,8 @@ import { createMissions } from './missions.js';
 import { createActivities } from './activities.js';
 import { createHud } from './hud.js';
 import { createScreens } from './screens.js';
+import { createTouchControls } from './touch.js';
+import { createWeather } from './weather.js';
 import { stageShot, shotFromURL, selftestFromURL } from './shots.js';
 
 window.__errors = [];
@@ -40,6 +42,7 @@ titleLight.visible = false;
 scene.add(titleLight);
 const audio = createAudio();
 const input = createInput(canvas);
+const touch = createTouchControls(input); // null on non-touch devices
 loadSettings();
 
 const city = buildCity(scene, 1);
@@ -56,8 +59,24 @@ const missions = createMissions({ city, driving, combat, police, crew, traffic, 
 const activities = createActivities({ city, driving, police, audio });
 const hud = createHud({ police, combat, crew });
 const screens = createScreens({ missions, activities, audio });
+const weather = createWeather(scene, audio);
 
 const ctx = { city, traffic, peds, player: playerObj, driving, police, combat, crew, missions, activities, hud, screens, audio, input, render };
+
+// Read-only probe hook for the CDP verification scripts (same pattern as
+// window.__selftest / __shotReady): lets a probe confirm the player moved,
+// the touch layer is live, or the weather is raining, without reaching
+// into module internals.
+window.__probe = {
+  player: () => ({ x: playerObj.p.x, z: playerObj.p.z }),
+  camYaw: () => playerObj.p.camYaw,
+  camera: () => ({ x: camera.position.x, y: camera.position.y, z: camera.position.z }),
+  speedKmh: () => S.speedKmh,
+  screen: () => S.screen,
+  inCar: () => S.inCar,
+  touch: () => (touch ? touch.state() : null),
+  weather: () => weather.state(),
+};
 
 let lastTime = performance.now() / 1000;
 let titleOrbit = 0;
@@ -65,6 +84,7 @@ let shotName = shotFromURL();
 let selftest = selftestFromURL();
 let shotFrames = 0;
 let deathTimer = 0;
+let prevPlayerPos = null; // previous frame's player position, for the police pursuit lead
 
 // Self-test state (declared up here: startSelftest runs during boot, below).
 let stSteps = [];
@@ -108,6 +128,7 @@ window.addEventListener('resize', () => render.resize());
 function expireTimedUI(now) {
   if (S.dialogue && now > S.dialogue.until) S.dialogue = null;
   if (S.banner && now > S.banner.until) S.banner = null;
+  if (S.areaBanner && now > S.areaBanner.until) S.areaBanner = null;
   if (S.toast && now > S.toast.until) S.toast = null;
 }
 
@@ -135,7 +156,7 @@ function handleActions(actions) {
     if (S.screen === 'game') screens.show('pause-screen');
     else if (S.screen === 'pause') screens.hideAll();
     else if (S.screen === 'map') screens.hideAll();
-    else if (S.screen === 'controls' || S.screen === 'settings' || S.screen === 'stats') screens.show('title-screen');
+    else if (S.screen === 'controls' || S.screen === 'settings' || S.screen === 'stats' || S.screen === 'showroom') screens.show('title-screen');
   }
   if (actions & ACT_INTERACT) {
     const pos = { x: playerObj.p.x, z: playerObj.p.z };
@@ -173,6 +194,9 @@ function frame() {
 
   // Timed UI expiry runs everywhere.
   expireTimedUI(now);
+
+  // Touch layer visibility mirrors the HUD (in-game only).
+  if (touch) touch.update();
 
   // Shot readiness: after enough FRAMES (not wall time — headless runs slow),
   // flag the capture script so the camera has settled and the chase has formed.
@@ -242,9 +266,12 @@ function frame() {
       camera.position.set(Math.cos(titleOrbit) * 170, 55, Math.sin(titleOrbit) * 170);
       camera.lookAt(0, 0, 0);
     }
-    traffic.update(dt, { x: 0, z: 0 }, null);
+    traffic.update(dt, { x: 0, z: 0 }, null, S.clock * 20);
     peds.update(dt, null, { x: 0, z: 0 });
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());
+    city.dynamic.updateTrafficLights(S.clock * 20);
+    // Rain over the title orbit in normal play; never in a staged shot.
+    if (!shotName) weather.update(dt, camera);
     render.render();
     return;
   }
@@ -259,6 +286,14 @@ function frame() {
       driving.update(dt, input, city.colliders, false);
       const car = driving.getCar();
       if (car) { pp.x = car.x; pp.z = car.z; }
+      // Mouse-look / touch look-drag while driving: player.update()
+      // (the only takeMouse consumer) never runs in a car, so the look
+      // deltas accumulated unspent and hit the camera on exit. Consume
+      // them here with the same sensitivity; the chase camera's blend
+      // toward the car heading re-centres the view afterwards.
+      const mouse = input.takeMouse();
+      pp.camYaw -= mouse.dx * 0.0028 * S.sensitivity;
+      pp.camPitch = Math.max(0.08, Math.min(1.1, pp.camPitch + mouse.dy * 0.0022 * S.sensitivity));
     } else {
       playerObj.update(dt, input, city.colliders, false);
     }
@@ -276,9 +311,18 @@ function frame() {
 
     // World systems.
     const gunfire = combat.gunfireAt;
-    traffic.update(dt, playerPos, gunfire);
+    traffic.update(dt, playerPos, gunfire, S.clock * 20);
     peds.update(dt, gunfire, playerPos);
-    police.update(dt, playerPos, S.speedKmh);
+    // Player velocity for the police pursuit lead (clamped: teleports
+    // would otherwise spike it for a frame).
+    let playerVel = { x: 0, z: 0 };
+    if (prevPlayerPos) {
+      playerVel = { x: (playerPos.x - prevPlayerPos.x) / Math.max(dt, 1e-3), z: (playerPos.z - prevPlayerPos.z) / Math.max(dt, 1e-3) };
+      const vl = Math.hypot(playerVel.x, playerVel.z);
+      if (vl > 70) { playerVel.x *= 70 / vl; playerVel.z *= 70 / vl; }
+    }
+    prevPlayerPos = { x: playerPos.x, z: playerPos.z };
+    police.update(dt, playerPos, S.speedKmh, playerVel);
     combat.update(dt, playerPos);
     crew.update(dt, playerPos, S.inCar, combat.enemies);
     missions.update(dt, playerPos);
@@ -292,6 +336,7 @@ function frame() {
     const car = driving.getCar();
     playerObj.updateCamera(dt, camera, car ? { x: car.x, z: car.z } : null, car ? car.heading : undefined);
     render.applyTimeOfDay(activities.sunPosition(), activities.isNight(), activities.isSunset());
+    city.dynamic.updateTrafficLights(S.clock * 20);
 
     // Death + respawn.
     if (S.health <= 0) {
@@ -317,6 +362,9 @@ function frame() {
     if (city.dynamic.wheel) city.dynamic.wheel.rotation.z += dt * 0.12;
     if (city.dynamic.water) { city.dynamic.water.position.x = Math.sin(now * 0.05) * 2; }
     if (city.dynamic.beaconRing) city.dynamic.beaconRing.rotation.z += dt;
+    // Rain + lightning: gameplay only — never in a staged shot or the
+    // self-test. Runs after applyTimeOfDay so the fog pull-in sticks.
+    if (!shotName && !selftest) weather.update(dt, camera);
   }
 
   render.render();

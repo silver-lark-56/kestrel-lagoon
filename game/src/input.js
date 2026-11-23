@@ -76,6 +76,10 @@ export function createInput(canvas) {
     get clickQueued() { return mouseClicked; },
     consumeClick() { mouseClicked = false; },
     takeMouse() { const d = { dx: mouseDX, dy: mouseDY }; mouseDX = 0; mouseDY = 0; return d; },
+    // Touch controls (touch.js) write into the SAME state: the look-drag
+    // adds mouse deltas, the FIRE button holds the trigger.
+    addLook(dx, dy) { mouseDX += dx; mouseDY += dy; },
+    setFiring(on) { mouseDown = !!on; },
     takeActions() { const a = actions; actions = 0; return a; },
     get locked() { return locked; },
     // Scripted input for the self-test and the staged screenshots.

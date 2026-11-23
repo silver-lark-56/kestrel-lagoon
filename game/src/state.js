@@ -23,6 +23,15 @@ export function freshState() {
     cash: 250, rep: 0,
     health: 100, armour: 0,
     wanted: 0, wantedTimer: 0, inSight: false, searchZone: 0,
+    heat: 0, // v8a #4: heat points — stars are derived from heat (34 = 1st star, then +100/star)
+    // v8a #6: leonida-style search state — the circle is centred where
+    // the player was LAST SEEN (not on the player) and grows while the
+    // cops sweep; hotScenes are crime scenes that re-raise the heat if
+    // the player walks back through them while clean.
+    searchCenter: null, // {x, z} while searching, else null
+    searchRadius: 0, // metres, grows 8/s while searching
+    lastSeen: null, // {x, z} where a cop last had eyes on the player
+    hotScenes: [], // {x, z, radius, until, playerInside}
     weaponIndex: 1,
     ammo: WEAPONS.map((w) => ({ mag: w.ammo === Infinity ? Infinity : w.ammo, reserve: w.reserve })),
     ownedWeapons: [0, 1],
@@ -44,6 +53,7 @@ export function freshState() {
     stats: freshStats(),
     dialogue: null, // {speaker, role, color, text, until}
     banner: null, // {text, sub, until} big centre announcement
+    areaBanner: null, // {name, blurb, until} district-entry announcement (v8a #5)
     toast: null, // {text, until} small notice
     objective: null, // {x, z, label, dist}
     gameOverReason: '',
@@ -150,6 +160,12 @@ export function showDialogue(speaker, role, color, text, seconds = 6) {
 
 export function showBanner(text, sub = '', seconds = 3) {
   S.banner = { text, sub, until: performance.now() / 1000 + seconds };
+}
+
+// v8a #5: the district name + blurb shown when the player enters a new
+// area (GTA's area-name card). Same expiry pattern as showBanner.
+export function showAreaBanner(name, blurb, seconds = 4) {
+  S.areaBanner = { name, blurb, until: performance.now() / 1000 + seconds };
 }
 
 export function showToast(text, seconds = 3) {

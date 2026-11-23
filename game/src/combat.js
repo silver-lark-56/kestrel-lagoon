@@ -93,7 +93,8 @@ export function createCombat(scene, camera, audio, police, peds) {
     const rng = makeRng(seed + count * 31);
     for (let i = 0; i < count; i++) {
       const ex = x + rng.range(-18, 18), ez = z + rng.range(-18, 18);
-      const mesh = buildPersonMesh(0xb03a30, rng.pick([0xc98d5f, 0xe8b98d, 0x8a5a3b]), 1.02);
+      const mesh = buildPersonMesh(0xb03a30, rng.pick([0xc98d5f, 0xe8b98d, 0x8a5a3b]), 1.02,
+        { hair: 0x1c1c22, hairStyle: 'short', accessory: 'bandana' });
       mesh.position.set(ex, 0, ez);
       // Red marker above every live enemy: at night a dark-red shirt on
       // a dark street is nearly invisible, so the firefight reads as
@@ -190,7 +191,7 @@ export function createCombat(scene, camera, audio, police, peds) {
     audio.gunshot();
     gunfireAt = { x: origin.x, z: origin.z };
     gunfireTimer = 1.2;
-    if (S.wanted === 0) police.addWanted(1, 'Shots fired');
+    if (S.wanted === 0) police.commitCrime('gunfire', 'Shots fired', { x: origin.x, z: origin.z });
     void fromCar;
     return true;
   }
@@ -211,7 +212,7 @@ export function createCombat(scene, camera, audio, police, peds) {
       }
     } else if (hit.kind === 'ped') {
       peds.killPed(hit.ref);
-      police.addWanted(1, 'Civilian down');
+      police.commitCrime('killPed', 'Civilian down', { x: hit.ref.x, z: hit.ref.z });
       addRep(-15);
     }
   }
